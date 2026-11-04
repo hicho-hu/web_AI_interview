@@ -1,0 +1,100 @@
+diff --git a/app/providers/compatible.py b/app/providers/compatible.py
+--- a/app/providers/compatible.py
++++ b/app/providers/compatible.py
+@@ -219,6 +219,18 @@
+             evidence_catalog = None
+             if operation == "report":
+                 payload, schema, evidence_catalog = prepare_report_evidence(payload, schema)
++            live_decision = operation == "decision" and live_sink.get() is not None
++            if live_decision:
++                schema = {
++                    **schema,
++                    "properties": {
++                        name: value
++                        for name, value in schema["properties"].items()
++                        if name in ("action", "question")
++                    },
++                    "required": ["action", "question"],
++                    "additionalProperties": False,
++                }
+             fmt = (
+                 {"type": "json_schema", "json_schema": {"name": operation, "schema": schema, "strict": False}}
+                 if s.compatible_json_schema
+@@ -239,10 +251,10 @@
+                 ],
+                 "response_format": fmt,
+             }
+-            if operation == "decision" and live_sink.get():
++            if live_decision:
+                 body["messages"][0]["content"] += (
+-                    "\n这是实时语音面试。追问只用一个简短问句（60字内）；reason控制在30字内，"
+-                    "answer_summary控制在80字内。直接输出完整JSON，避免长篇分析或复述回答。"
++                    "\n这是实时语音面试，只输出action和question两个字段。追问只用一个简短问句（60字内）；"
++                    "不要生成分析、理由、摘要或评价。详细评估由面试结束后的报告完成。"
+                 )
+             if s.provider_model == "qwen3.8-omni-flash":
+                 body.update(
+@@ -256,6 +268,17 @@
+             else:
+                 raw = self.request("/chat/completions", json=body).json()
+             data = json.loads(raw["choices"][0]["message"]["content"])
++            if live_decision:
++                require(
++                    isinstance(data, dict) and set(data) <= {"action", "question"},
++                    "AI_OUTPUT_INVALID",
++                    "实时对话输出结构无效",
++                    502,
++                )
++                # Keep the durable Decision contract and report evidence unchanged.
++                # Context uses an exact excerpt; no extra model round trip or invented summary.
++                data["reason"] = "实时对话接续，详细评价在报告阶段生成。"
++                data["answer_summary"] = payload["answer"][:160]
+             if evidence_catalog is not None:
+                 data = resolve_report_evidence(data, evidence_catalog)
+             usage["input_tokens"] = raw.get("usage", {}).get("prompt_tokens", 0)
+diff --git a/tests/test_live_conversation.py b/tests/test_live_conversation.py
+--- a/tests/test_live_conversation.py
++++ b/tests/test_live_conversation.py
+@@ -216,3 +216,42 @@
+         asset = db.get(MediaAsset, ticket["asset_id"])
+         rt.storage.put(asset.object_key, content, "text/vtt")
+         assert svc.complete(asset.id, UploadComplete())["status"] == "READY"
++
++
++def test_live_decision_generates_only_the_next_question_and_keeps_raw_evidence(monkeypatch):
++    from app.providers.compatible import CompatibleProvider
++    from app.schemas.contracts import Decision
++    from tests.test_qwen_providers import qwen_settings
++
++    captured = []
++
++    def stream(body):
++        captured.append(body)
++        return {
++            "choices": [
++                {
++                    "message": {
++                        "content": json.dumps(
++                            {"action": "FOLLOW_UP", "question": "如何验证优化结果？"}, ensure_ascii=False
++                        )
++                    }
++                }
++            ],
++            "usage": {"prompt_tokens": 20, "completion_tokens": 10},
++        }
++
++    provider = CompatibleProvider(qwen_settings(), None)
++    monkeypatch.setattr(provider, "stream_chat", stream)
++    original = "我负责 React 组件开发、性能优化以及验证。"
++    token = live_sink.set(lambda _: None)
++    try:
++        output = provider.invoke("decision", {"answer": original}, Decision.model_json_schema())
++    finally:
++        live_sink.reset(token)
++    parsed = Decision.model_validate(output["data"])
++    assert parsed.answer_summary == original
++    assert parsed.question == "如何验证优化结果？"
++    schema_text = (
++        captured[0]["messages"][0]["content"].split("输出 JSON Schema：")[1].split("\n这是实时语音面试")[0]
++    )
++    assert set(json.loads(schema_text)["properties"]) == {"action", "question"}

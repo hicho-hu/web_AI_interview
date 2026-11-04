@@ -1,0 +1,2111 @@
+--- a/src/pages/Commerce.tsx
++++ b/src/pages/Commerce.tsx
+@@ -32,6 +32,10 @@
+   statusOptions,
+   useAction,
+ } from "./shared";
++const entitlementText = (r: Row) =>
++  r.interview_credits
++    ? `文字 ${r.interview_credits.TEXT} 次 + 语音 ${r.interview_credits.VOICE} 次 + 视频 ${r.interview_credits.VIDEO} 次`
++    : `通用 ${r.credits} 次`;
+ export function FinancePage() {
+   const period = usePeriod();
+   const summary = useQuery({
+@@ -120,6 +124,7 @@
+                     render: (v) => <Id value={v} />,
+                   },
+                   { title: "商品 SKU", dataIndex: "product_code" },
++                  { title: "权益明细", render: (_, r) => entitlementText(r) },
+                   {
+                     title: "实付金额",
+                     dataIndex: "amount_minor",
+@@ -382,7 +387,7 @@
+         className="page-alert"
+         type="info"
+         showIcon
+-        message="发布后立即生效，新价格仅影响新订单。当前套餐一次性发放总次数，有效期仅为配置，尚未执行到期回收与周期重置。"
++        message="发布后立即生效，新价格仅影响新订单。套餐按文字、语音和视频分别发放次数，组合以订单创建时的快照为准，有效期仅为配置，尚未执行到期回收与周期重置。"
+       />
+       <DataTable
+         path="/products"
+@@ -408,7 +413,15 @@
+               </div>
+             ),
+           },
+-          { title: "训练额度", dataIndex: "credits", render: (v) => `${v} 次` },
++          {
++            title: "训练额度",
++            render: (_, r) => (
++              <div className="stack">
++                <strong>{r.credits} 次合计</strong>
++                <small>{entitlementText(r)}</small>
++              </div>
++            ),
++          },
+           {
+             title: "配置有效期",
+             dataIndex: "validity_days",
+@@ -448,10 +461,19 @@
+         open={open}
+         initial={
+           selected
+-            ? { ...selected, reason: undefined }
++            ? {
++                ...selected,
++                text_credits:
++                  selected.interview_credits?.TEXT ?? selected.credits,
++                voice_credits: selected.interview_credits?.VOICE ?? 0,
++                video_credits: selected.interview_credits?.VIDEO ?? 0,
++                reason: undefined,
++              }
+             : {
+                 kind: "SINGLE",
+-                credits: 1,
++                text_credits: 3,
++                voice_credits: 2,
++                video_credits: 1,
+                 amount_minor: 990,
+                 original_minor: 1290,
+                 validity_days: 30,
+@@ -506,11 +528,15 @@
+               />
+             ),
+           },
+-          {
+-            name: "credits",
+-            label: "一次性发放次数",
+-            node: <InputNumber min={1} max={10000} precision={0} />,
+-          },
++          ...[
++            ["text_credits", "文字面试次数"],
++            ["voice_credits", "语音面试次数"],
++            ["video_credits", "视频面试次数"],
++          ].map(([name, label]) => ({
++            name,
++            label,
++            node: <InputNumber min={0} max={10000} precision={0} />,
++          })),
+           {
+             name: "validity_days",
+             label: "配置有效天数（暂不执行到期回收）",
+@@ -525,6 +551,7 @@
+           reasonField,
+         ]}
+         busy={action.busy}
++        description="各类型可设为 0，合计至少 1 次。旧通用套餐创建新版本时，请重新确认分类次数。"
+         onSubmit={(v) => {
+           const allowed = [
+             "code",
+@@ -532,25 +559,27 @@
+             "kind",
+             "amount_minor",
+             "original_minor",
+-            "credits",
+             "validity_days",
+             "description",
+             "reason",
+           ];
+-          return action.run(
+-            "/products",
+-            "POST",
+-            Object.fromEntries(
++          return action.run("/products", "POST", {
++            ...Object.fromEntries(
+               allowed.filter((k) => v[k] !== undefined).map((k) => [k, v[k]]),
+             ),
+-          );
++            interview_credits: {
++              TEXT: v.text_credits,
++              VOICE: v.voice_credits,
++              VIDEO: v.video_credits,
++            },
++          });
+         }}
+       />
+       <EditModal
+         title="发布商品"
+         open={!!publishing}
+         onClose={() => setPublishing(null)}
+-        description={`${publishing?.name || ""} · ${money(publishing?.amount_minor)}，确认后立即发布。`}
++        description={`${publishing?.name || ""} · ${money(publishing?.amount_minor)} · ${publishing ? entitlementText(publishing) : ""}，确认后立即发布。`}
+         fields={[reasonField]}
+         busy={action.busy}
+         onSubmit={(values) =>
+--- a/src/pages/Operations.tsx
++++ b/src/pages/Operations.tsx
+@@ -74,7 +74,10 @@
+             render: (v) => <Status value={v} />,
+           },
+           { title: "面试次数", dataIndex: "interview_count" },
+-          { title: "剩余额度", dataIndex: "credits", render: (v) => `${v} 次` },
++          {
++            title: "剩余额度",
++            render: (_, r) => `${r.remaining_interviews ?? r.credits} 次`,
++          },
+           { title: "累计支付", dataIndex: "paid_minor", render: money },
+           { title: "注册时间", dataIndex: "created_at", render: dateTime },
+           {
+@@ -111,7 +114,15 @@
+                   {
+                     key: "credits",
+                     label: "可用次数",
+-                    children: `${d.credits} 次`,
++                    children: `${d.remaining_interviews ?? d.credits} 次`,
++                  },
++                  {
++                    key: "mode-credits",
++                    label: "分类次数",
++                    span: 2,
++                    children: d.interview_credits
++                      ? `文字 ${d.interview_credits.TEXT} 次 · 语音 ${d.interview_credits.VOICE} 次 · 视频 ${d.interview_credits.VIDEO} 次 · 通用 ${d.universal_interviews} 次`
++                      : `通用 ${d.credits} 次`,
+                   },
+                   {
+                     key: "created",
+@@ -148,6 +159,16 @@
+                         columns={[
+                           { title: "类型", dataIndex: "usage_type" },
+                           { title: "次数变动", dataIndex: "quantity" },
++                          {
++                            title: "次数明细",
++                            render: (_, r) =>
++                              Object.entries(r.credit_allocations ?? {})
++                                .map(
++                                  ([mode, quantity]) =>
++                                    `${({ TEXT: "文字", VOICE: "语音", VIDEO: "视频", UNIVERSAL: "通用" } as Record<string, string>)[mode]} ${quantity}`,
++                                )
++                                .join(" · "),
++                          },
+                           {
+                             title: "状态",
+                             dataIndex: "status",
+@@ -240,6 +261,20 @@
+           action === "grant"
+             ? [
+                 {
++                  name: "mode",
++                  label: "面试类型",
++                  node: (
++                    <Select
++                      options={[
++                        { value: "TEXT", label: "文字面试" },
++                        { value: "VOICE", label: "语音面试" },
++                        { value: "VIDEO", label: "视频面试" },
++                        { value: "UNIVERSAL", label: "通用次数（兼容旧权益）" },
++                      ]}
++                    />
++                  ),
++                },
++                {
+                   name: "quantity",
+                   label: "补发次数",
+                   node: <InputNumber min={1} max={1000} />,
+@@ -253,7 +288,7 @@
+               ]
+             : [reasonField]
+         }
+-        initial={{ quantity: 1 }}
++        initial={{ quantity: 1, mode: "TEXT" }}
+         onSubmit={(values) =>
+           mutation.run(
+             `/users/${selected?.id}/${action === "grant" ? "entitlements" : "status"}`,
+--- a/src/generated/api.d.ts
++++ b/src/generated/api.d.ts
+@@ -1048,6 +1048,23 @@
+     get: operations["report_api_v1_interviews__interview_id__report_get"];
+     put?: never;
+     post?: never;
++    delete?: never;
++    options?: never;
++    head?: never;
++    patch?: never;
++    trace?: never;
++  };
++  "/api/v1/interviews/{interview_id}/turns/{turn_id}/submit-stream": {
++    parameters: {
++      query?: never;
++      header?: never;
++      path?: never;
++      cookie?: never;
++    };
++    get?: never;
++    put?: never;
++    /** Answer Stream */
++    post: operations["answer_stream_api_v1_interviews__interview_id__turns__turn_id__submit_stream_post"];
+     delete?: never;
+     options?: never;
+     head?: never;
+@@ -1444,6 +1461,8 @@
+       asset_ids?: string[] | null;
+       /** Client Duration Ms */
+       client_duration_ms?: number | null;
++      /** Live Transcript Id */
++      live_transcript_id?: string | null;
+     };
+     /** ConsentInput */
+     ConsentInput: {
+@@ -1483,6 +1502,12 @@
+        * @default
+        */
+       ticket: string;
++      /**
++       * Mode
++       * @default UNIVERSAL
++       * @enum {string}
++       */
++      mode: "TEXT" | "VOICE" | "VIDEO" | "UNIVERSAL";
+     };
+     /** Envelope */
+     Envelope: {
+@@ -1629,6 +1654,24 @@
+       /** Code */
+       code: string;
+     };
++    /** ModeCredits */
++    ModeCredits: {
++      /**
++       * Text
++       * @default 0
++       */
++      TEXT: number;
++      /**
++       * Voice
++       * @default 0
++       */
++      VOICE: number;
++      /**
++       * Video
++       * @default 0
++       */
++      VIDEO: number;
++    };
+     /** OrderInput */
+     OrderInput: {
+       /** Product Code */
+@@ -1676,7 +1719,8 @@
+       /** Original Minor */
+       original_minor: number;
+       /** Credits */
+-      credits: number;
++      credits?: number | null;
++      interview_credits?: components["schemas"]["ModeCredits"] | null;
+       /** Validity Days */
+       validity_days: number;
+       /**
+@@ -1777,7 +1821,8 @@
+         | "RESUME"
+         | "JD_IMAGE"
+         | "SESSION_AUDIO"
+-        | "SESSION_VIDEO";
++        | "SESSION_VIDEO"
++        | "SESSION_CAPTIONS";
+       /** Interview Id */
+       interview_id?: string | null;
+       /** Turn Id */
+@@ -4344,6 +4389,45 @@
+       };
+     };
+   };
++  answer_stream_api_v1_interviews__interview_id__turns__turn_id__submit_stream_post: {
++    parameters: {
++      query?: never;
++      header: {
++        "idempotency-key": string;
++        authorization?: string;
++      };
++      path: {
++        interview_id: string;
++        turn_id: string;
++      };
++      cookie?: never;
++    };
++    requestBody: {
++      content: {
++        "application/json": components["schemas"]["Answer"];
++      };
++    };
++    responses: {
++      /** @description Successful Response */
++      200: {
++        headers: {
++          [name: string]: unknown;
++        };
++        content: {
++          "application/json": unknown;
++        };
++      };
++      /** @description Validation Error */
++      422: {
++        headers: {
++          [name: string]: unknown;
++        };
++        content: {
++          "application/json": components["schemas"]["HTTPValidationError"];
++        };
++      };
++    };
++  };
+   regenerate_api_v1_interviews__interview_id__report_regenerate_post: {
+     parameters: {
+       query?: never;
+--- a/tests/e2e/admin.spec.ts
++++ b/tests/e2e/admin.spec.ts
+@@ -67,6 +67,7 @@
+   await page.getByRole("button", { name: "确认提交" }).click();
+   await expect(page.getByText("商品已发布，立即生效")).toBeVisible();
+   await expect(row.getByText("已发布")).toBeVisible();
++  await expect(row).toContainText("文字 3 次 + 语音 2 次 + 视频 1 次");
+   await expect(page.getByRole("link", { name: "审批中心" })).toHaveCount(0);
+ });
+ 
+@@ -79,6 +80,8 @@
+   await page.getByRole("link", { name: "用户中心", exact: true }).click();
+   await page.getByRole("button", { name: "查看详情" }).first().click();
+   await page.getByRole("button", { name: "补发权益", exact: true }).click();
++  await page.getByLabel("面试类型", { exact: true }).press("ArrowDown");
++  await page.getByText("语音面试", { exact: true }).click();
+   await page.getByLabel("补发次数").fill("2");
+   await page.getByLabel("操作原因").fill("直接补发系统异常额度");
+   await page.getByRole("button", { name: "确认提交" }).click();
+@@ -88,7 +91,10 @@
+       await page.request.get(`/api/v1/admin/users/${user.id}`, { headers })
+     ).json()
+   ).data;
+-  expect(updated.credits).toBe(user.credits + 2);
++  expect(updated.interview_credits.VOICE).toBe(
++    (user.interview_credits?.VOICE ?? 0) + 2,
++  );
++  expect(updated.universal_interviews).toBe(user.universal_interviews);
+ });
+ 
+ test("支付配置保存后立即可查询", async ({ page }) => {
+--- a/docs/openapi.json
++++ b/docs/openapi.json
+@@ -40,9 +40,7 @@
+     },
+     "/api/v1/admin/auth/login": {
+       "post": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Login",
+         "operationId": "login_api_v1_admin_auth_login_post",
+         "requestBody": {
+@@ -81,9 +79,7 @@
+     },
+     "/api/v1/admin/auth/me": {
+       "get": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Me",
+         "operationId": "me_api_v1_admin_auth_me_get",
+         "parameters": [
+@@ -124,9 +120,7 @@
+     },
+     "/api/v1/admin/auth/logout": {
+       "post": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Logout",
+         "operationId": "logout_api_v1_admin_auth_logout_post",
+         "parameters": [
+@@ -167,9 +161,7 @@
+     },
+     "/api/v1/admin/auth/mfa/setup": {
+       "post": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Setup",
+         "operationId": "setup_api_v1_admin_auth_mfa_setup_post",
+         "parameters": [
+@@ -210,9 +202,7 @@
+     },
+     "/api/v1/admin/auth/mfa/confirm": {
+       "post": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Confirm",
+         "operationId": "confirm_api_v1_admin_auth_mfa_confirm_post",
+         "parameters": [
+@@ -263,9 +253,7 @@
+     },
+     "/api/v1/admin/dashboard/overview": {
+       "get": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Overview",
+         "operationId": "overview_api_v1_admin_dashboard_overview_get",
+         "parameters": [
+@@ -350,9 +338,7 @@
+     },
+     "/api/v1/admin/dashboard/trends": {
+       "get": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Trends",
+         "operationId": "trends_api_v1_admin_dashboard_trends_get",
+         "parameters": [
+@@ -437,9 +423,7 @@
+     },
+     "/api/v1/admin/users": {
+       "get": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Users",
+         "operationId": "users_api_v1_admin_users_get",
+         "parameters": [
+@@ -524,9 +508,7 @@
+     },
+     "/api/v1/admin/users/{uid}": {
+       "get": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "User",
+         "operationId": "user_api_v1_admin_users__uid__get",
+         "parameters": [
+@@ -576,9 +558,7 @@
+     },
+     "/api/v1/admin/users/{uid}/status": {
+       "patch": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Status",
+         "operationId": "status_api_v1_admin_users__uid__status_patch",
+         "parameters": [
+@@ -647,9 +627,7 @@
+     },
+     "/api/v1/admin/users/{uid}/entitlements": {
+       "post": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Grant",
+         "operationId": "grant_api_v1_admin_users__uid__entitlements_post",
+         "parameters": [
+@@ -718,9 +696,7 @@
+     },
+     "/api/v1/admin/interviews": {
+       "get": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Interviews",
+         "operationId": "interviews_api_v1_admin_interviews_get",
+         "parameters": [
+@@ -815,9 +791,7 @@
+     },
+     "/api/v1/admin/interviews/{iid}": {
+       "get": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Interview",
+         "operationId": "interview_api_v1_admin_interviews__iid__get",
+         "parameters": [
+@@ -867,9 +841,7 @@
+     },
+     "/api/v1/admin/interviews/{iid}/review": {
+       "post": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Review Content",
+         "operationId": "review_content_api_v1_admin_interviews__iid__review_post",
+         "parameters": [
+@@ -929,9 +901,7 @@
+     },
+     "/api/v1/admin/interviews/{iid}/retry-report": {
+       "post": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Retry Report",
+         "operationId": "retry_report_api_v1_admin_interviews__iid__retry_report_post",
+         "parameters": [
+@@ -1000,9 +970,7 @@
+     },
+     "/api/v1/admin/media/{mid}/playback-grant": {
+       "post": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Playback",
+         "operationId": "playback_api_v1_admin_media__mid__playback_grant_post",
+         "parameters": [
+@@ -1062,9 +1030,7 @@
+     },
+     "/api/v1/admin/quality-tasks": {
+       "get": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Quality",
+         "operationId": "quality_api_v1_admin_quality_tasks_get",
+         "parameters": [
+@@ -1126,9 +1092,7 @@
+         }
+       },
+       "post": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Quality Create",
+         "operationId": "quality_create_api_v1_admin_quality_tasks_post",
+         "parameters": [
+@@ -1188,9 +1152,7 @@
+     },
+     "/api/v1/admin/quality-assignees": {
+       "get": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Assignees",
+         "operationId": "assignees_api_v1_admin_quality_assignees_get",
+         "parameters": [
+@@ -1231,9 +1193,7 @@
+     },
+     "/api/v1/admin/quality-tasks/{qid}": {
+       "patch": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Quality Update",
+         "operationId": "quality_update_api_v1_admin_quality_tasks__qid__patch",
+         "parameters": [
+@@ -1302,9 +1262,7 @@
+     },
+     "/api/v1/admin/finance/summary": {
+       "get": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Finance",
+         "operationId": "finance_api_v1_admin_finance_summary_get",
+         "parameters": [
+@@ -1389,9 +1347,7 @@
+     },
+     "/api/v1/admin/orders": {
+       "get": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Orders",
+         "operationId": "orders_api_v1_admin_orders_get",
+         "parameters": [
+@@ -1476,9 +1432,7 @@
+     },
+     "/api/v1/admin/refunds": {
+       "get": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Refunds",
+         "operationId": "refunds_api_v1_admin_refunds_get",
+         "parameters": [
+@@ -1540,9 +1494,7 @@
+         }
+       },
+       "post": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Refund",
+         "operationId": "refund_api_v1_admin_refunds_post",
+         "parameters": [
+@@ -1602,9 +1554,7 @@
+     },
+     "/api/v1/admin/products": {
+       "get": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Products",
+         "operationId": "products_api_v1_admin_products_get",
+         "parameters": [
+@@ -1666,9 +1616,7 @@
+         }
+       },
+       "post": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Product",
+         "operationId": "product_api_v1_admin_products_post",
+         "parameters": [
+@@ -1728,9 +1676,7 @@
+     },
+     "/api/v1/admin/products/{pid}/publish": {
+       "post": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Publish",
+         "operationId": "publish_api_v1_admin_products__pid__publish_post",
+         "parameters": [
+@@ -1799,9 +1745,7 @@
+     },
+     "/api/v1/admin/payment-channels": {
+       "get": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Payments",
+         "operationId": "payments_api_v1_admin_payment_channels_get",
+         "parameters": [
+@@ -1842,9 +1786,7 @@
+     },
+     "/api/v1/admin/payment-channels/{channel}": {
+       "put": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Payment",
+         "operationId": "payment_api_v1_admin_payment_channels__channel__put",
+         "parameters": [
+@@ -1913,9 +1855,7 @@
+     },
+     "/api/v1/admin/payment-channels/{channel}/validate": {
+       "post": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Validate Payment",
+         "operationId": "validate_payment_api_v1_admin_payment_channels__channel__validate_post",
+         "parameters": [
+@@ -1965,9 +1905,7 @@
+     },
+     "/api/v1/admin/reconciliations": {
+       "get": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Reconciliations",
+         "operationId": "reconciliations_api_v1_admin_reconciliations_get",
+         "parameters": [
+@@ -2031,9 +1969,7 @@
+     },
+     "/api/v1/admin/reconciliations/{bid}/items": {
+       "get": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Reconciliation Items",
+         "operationId": "reconciliation_items_api_v1_admin_reconciliations__bid__items_get",
+         "parameters": [
+@@ -2106,9 +2042,7 @@
+     },
+     "/api/v1/admin/reconciliations/run": {
+       "post": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Reconcile",
+         "operationId": "reconcile_api_v1_admin_reconciliations_run_post",
+         "parameters": [
+@@ -2168,9 +2102,7 @@
+     },
+     "/api/v1/admin/reconciliation-items/{rid}": {
+       "patch": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Resolve",
+         "operationId": "resolve_api_v1_admin_reconciliation_items__rid__patch",
+         "parameters": [
+@@ -2239,9 +2171,7 @@
+     },
+     "/api/v1/admin/ai/costs": {
+       "get": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Ai",
+         "operationId": "ai_api_v1_admin_ai_costs_get",
+         "parameters": [
+@@ -2326,9 +2256,7 @@
+     },
+     "/api/v1/admin/admin-users": {
+       "get": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Admins",
+         "operationId": "admins_api_v1_admin_admin_users_get",
+         "parameters": [
+@@ -2390,9 +2318,7 @@
+         }
+       },
+       "post": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Create",
+         "operationId": "create_api_v1_admin_admin_users_post",
+         "parameters": [
+@@ -2452,9 +2378,7 @@
+     },
+     "/api/v1/admin/admin-users/{aid}": {
+       "patch": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Change",
+         "operationId": "change_api_v1_admin_admin_users__aid__patch",
+         "parameters": [
+@@ -2523,9 +2447,7 @@
+     },
+     "/api/v1/admin/roles": {
+       "get": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Roles",
+         "operationId": "roles_api_v1_admin_roles_get",
+         "parameters": [
+@@ -2566,9 +2488,7 @@
+     },
+     "/api/v1/admin/audit-logs": {
+       "get": {
+-        "tags": [
+-          "运营管理后台"
+-        ],
++        "tags": ["运营管理后台"],
+         "summary": "Audits",
+         "operationId": "audits_api_v1_admin_audit_logs_get",
+         "parameters": [
+@@ -2643,9 +2563,7 @@
+     },
+     "/api/v1/auth/wechat-login": {
+       "post": {
+-        "tags": [
+-          "身份与用户"
+-        ],
++        "tags": ["身份与用户"],
+         "summary": "Wechat Login",
+         "operationId": "wechat_login_api_v1_auth_wechat_login_post",
+         "requestBody": {
+@@ -2684,9 +2602,7 @@
+     },
+     "/api/v1/auth/dev-login": {
+       "post": {
+-        "tags": [
+-          "身份与用户"
+-        ],
++        "tags": ["身份与用户"],
+         "summary": "Dev Login",
+         "operationId": "dev_login_api_v1_auth_dev_login_post",
+         "requestBody": {
+@@ -2725,9 +2641,7 @@
+     },
+     "/api/v1/auth/logout": {
+       "post": {
+-        "tags": [
+-          "身份与用户"
+-        ],
++        "tags": ["身份与用户"],
+         "summary": "Logout",
+         "operationId": "logout_api_v1_auth_logout_post",
+         "parameters": [
+@@ -2768,9 +2682,7 @@
+     },
+     "/api/v1/users/me": {
+       "get": {
+-        "tags": [
+-          "身份与用户"
+-        ],
++        "tags": ["身份与用户"],
+         "summary": "Me",
+         "operationId": "me_api_v1_users_me_get",
+         "parameters": [
+@@ -2809,9 +2721,7 @@
+         }
+       },
+       "patch": {
+-        "tags": [
+-          "身份与用户"
+-        ],
++        "tags": ["身份与用户"],
+         "summary": "Patch Me",
+         "operationId": "patch_me_api_v1_users_me_patch",
+         "parameters": [
+@@ -2862,9 +2772,7 @@
+     },
+     "/api/v1/users/me/consents": {
+       "get": {
+-        "tags": [
+-          "身份与用户"
+-        ],
++        "tags": ["身份与用户"],
+         "summary": "Consents",
+         "operationId": "consents_api_v1_users_me_consents_get",
+         "parameters": [
+@@ -2903,9 +2811,7 @@
+         }
+       },
+       "post": {
+-        "tags": [
+-          "身份与用户"
+-        ],
++        "tags": ["身份与用户"],
+         "summary": "Consent",
+         "operationId": "consent_api_v1_users_me_consents_post",
+         "parameters": [
+@@ -2956,9 +2862,7 @@
+     },
+     "/api/v1/users/me/consents/{kind}": {
+       "delete": {
+-        "tags": [
+-          "身份与用户"
+-        ],
++        "tags": ["身份与用户"],
+         "summary": "Revoke",
+         "operationId": "revoke_api_v1_users_me_consents__kind__delete",
+         "parameters": [
+@@ -3008,9 +2912,7 @@
+     },
+     "/api/v1/users/me/data": {
+       "get": {
+-        "tags": [
+-          "身份与用户"
+-        ],
++        "tags": ["身份与用户"],
+         "summary": "Export Data",
+         "operationId": "export_data_api_v1_users_me_data_get",
+         "parameters": [
+@@ -3049,9 +2951,7 @@
+         }
+       },
+       "delete": {
+-        "tags": [
+-          "身份与用户"
+-        ],
++        "tags": ["身份与用户"],
+         "summary": "Erase Data",
+         "operationId": "erase_data_api_v1_users_me_data_delete",
+         "parameters": [
+@@ -3092,9 +2992,7 @@
+     },
+     "/api/v1/job-profiles": {
+       "post": {
+-        "tags": [
+-          "岗位与简历"
+-        ],
++        "tags": ["岗位与简历"],
+         "summary": "Create Job",
+         "operationId": "create_job_api_v1_job_profiles_post",
+         "parameters": [
+@@ -3143,9 +3041,7 @@
+         }
+       },
+       "get": {
+-        "tags": [
+-          "岗位与简历"
+-        ],
++        "tags": ["岗位与简历"],
+         "summary": "Jobs",
+         "operationId": "jobs_api_v1_job_profiles_get",
+         "parameters": [
+@@ -3209,9 +3105,7 @@
+     },
+     "/api/v1/job-profiles/{job_id}": {
+       "get": {
+-        "tags": [
+-          "岗位与简历"
+-        ],
++        "tags": ["岗位与简历"],
+         "summary": "Job",
+         "operationId": "job_api_v1_job_profiles__job_id__get",
+         "parameters": [
+@@ -3259,9 +3153,7 @@
+         }
+       },
+       "patch": {
+-        "tags": [
+-          "岗位与简历"
+-        ],
++        "tags": ["岗位与简历"],
+         "summary": "Patch Job",
+         "operationId": "patch_job_api_v1_job_profiles__job_id__patch",
+         "parameters": [
+@@ -3319,9 +3211,7 @@
+         }
+       },
+       "delete": {
+-        "tags": [
+-          "岗位与简历"
+-        ],
++        "tags": ["岗位与简历"],
+         "summary": "Delete Job",
+         "operationId": "delete_job_api_v1_job_profiles__job_id__delete",
+         "parameters": [
+@@ -3371,9 +3261,7 @@
+     },
+     "/api/v1/resumes/upload-url": {
+       "post": {
+-        "tags": [
+-          "岗位与简历"
+-        ],
++        "tags": ["岗位与简历"],
+         "summary": "Resume Upload",
+         "operationId": "resume_upload_api_v1_resumes_upload_url_post",
+         "parameters": [
+@@ -3424,9 +3312,7 @@
+     },
+     "/api/v1/resumes": {
+       "get": {
+-        "tags": [
+-          "岗位与简历"
+-        ],
++        "tags": ["岗位与简历"],
+         "summary": "Resumes",
+         "operationId": "resumes_api_v1_resumes_get",
+         "parameters": [
+@@ -3490,9 +3376,7 @@
+     },
+     "/api/v1/resumes/{resume_id}": {
+       "get": {
+-        "tags": [
+-          "岗位与简历"
+-        ],
++        "tags": ["岗位与简历"],
+         "summary": "Resume",
+         "operationId": "resume_api_v1_resumes__resume_id__get",
+         "parameters": [
+@@ -3540,9 +3424,7 @@
+         }
+       },
+       "delete": {
+-        "tags": [
+-          "岗位与简历"
+-        ],
++        "tags": ["岗位与简历"],
+         "summary": "Delete Resume",
+         "operationId": "delete_resume_api_v1_resumes__resume_id__delete",
+         "parameters": [
+@@ -3592,9 +3474,7 @@
+     },
+     "/api/v1/interviews": {
+       "post": {
+-        "tags": [
+-          "面试与报告"
+-        ],
++        "tags": ["面试与报告"],
+         "summary": "Create",
+         "operationId": "create_api_v1_interviews_post",
+         "parameters": [
+@@ -3652,9 +3532,7 @@
+         }
+       },
+       "get": {
+-        "tags": [
+-          "面试与报告"
+-        ],
++        "tags": ["面试与报告"],
+         "summary": "History",
+         "operationId": "history_api_v1_interviews_get",
+         "parameters": [
+@@ -3784,9 +3662,7 @@
+     },
+     "/api/v1/interviews/{interview_id}": {
+       "get": {
+-        "tags": [
+-          "面试与报告"
+-        ],
++        "tags": ["面试与报告"],
+         "summary": "Detail",
+         "operationId": "detail_api_v1_interviews__interview_id__get",
+         "parameters": [
+@@ -3834,9 +3710,7 @@
+         }
+       },
+       "delete": {
+-        "tags": [
+-          "面试与报告"
+-        ],
++        "tags": ["面试与报告"],
+         "summary": "Delete Interview",
+         "operationId": "delete_interview_api_v1_interviews__interview_id__delete",
+         "parameters": [
+@@ -3886,9 +3760,7 @@
+     },
+     "/api/v1/interviews/{interview_id}/start": {
+       "post": {
+-        "tags": [
+-          "面试与报告"
+-        ],
++        "tags": ["面试与报告"],
+         "summary": "Start",
+         "operationId": "start_api_v1_interviews__interview_id__start_post",
+         "parameters": [
+@@ -3938,9 +3810,7 @@
+     },
+     "/api/v1/interviews/{interview_id}/pause": {
+       "post": {
+-        "tags": [
+-          "面试与报告"
+-        ],
++        "tags": ["面试与报告"],
+         "summary": "Pause",
+         "operationId": "pause_api_v1_interviews__interview_id__pause_post",
+         "parameters": [
+@@ -3990,9 +3860,7 @@
+     },
+     "/api/v1/interviews/{interview_id}/resume": {
+       "post": {
+-        "tags": [
+-          "面试与报告"
+-        ],
++        "tags": ["面试与报告"],
+         "summary": "Resume",
+         "operationId": "resume_api_v1_interviews__interview_id__resume_post",
+         "parameters": [
+@@ -4042,9 +3910,7 @@
+     },
+     "/api/v1/interviews/{interview_id}/cancel": {
+       "post": {
+-        "tags": [
+-          "面试与报告"
+-        ],
++        "tags": ["面试与报告"],
+         "summary": "Cancel",
+         "operationId": "cancel_api_v1_interviews__interview_id__cancel_post",
+         "parameters": [
+@@ -4094,9 +3960,7 @@
+     },
+     "/api/v1/interviews/{interview_id}/retry": {
+       "post": {
+-        "tags": [
+-          "面试与报告"
+-        ],
++        "tags": ["面试与报告"],
+         "summary": "Retry",
+         "operationId": "retry_api_v1_interviews__interview_id__retry_post",
+         "parameters": [
+@@ -4146,9 +4010,7 @@
+     },
+     "/api/v1/interviews/{interview_id}/finish": {
+       "post": {
+-        "tags": [
+-          "面试与报告"
+-        ],
++        "tags": ["面试与报告"],
+         "summary": "Finish",
+         "operationId": "finish_api_v1_interviews__interview_id__finish_post",
+         "parameters": [
+@@ -4217,9 +4079,7 @@
+     },
+     "/api/v1/interviews/{interview_id}/turns": {
+       "get": {
+-        "tags": [
+-          "面试与报告"
+-        ],
++        "tags": ["面试与报告"],
+         "summary": "Turns",
+         "operationId": "turns_api_v1_interviews__interview_id__turns_get",
+         "parameters": [
+@@ -4269,9 +4129,7 @@
+     },
+     "/api/v1/interviews/{interview_id}/turns/{turn_id}/submit": {
+       "post": {
+-        "tags": [
+-          "面试与报告"
+-        ],
++        "tags": ["面试与报告"],
+         "summary": "Answer",
+         "operationId": "answer_api_v1_interviews__interview_id__turns__turn_id__submit_post",
+         "parameters": [
+@@ -4349,9 +4207,7 @@
+     },
+     "/api/v1/interviews/{interview_id}/report": {
+       "get": {
+-        "tags": [
+-          "面试与报告"
+-        ],
++        "tags": ["面试与报告"],
+         "summary": "Report",
+         "operationId": "report_api_v1_interviews__interview_id__report_get",
+         "parameters": [
+@@ -4416,13 +4272,11 @@
+         }
+       }
+     },
+-    "/api/v1/interviews/{interview_id}/report/regenerate": {
++    "/api/v1/interviews/{interview_id}/turns/{turn_id}/submit-stream": {
+       "post": {
+-        "tags": [
+-          "面试与报告"
+-        ],
+-        "summary": "Regenerate",
+-        "operationId": "regenerate_api_v1_interviews__interview_id__report_regenerate_post",
++        "tags": ["面试与报告"],
++        "summary": "Answer Stream",
++        "operationId": "answer_stream_api_v1_interviews__interview_id__turns__turn_id__submit_stream_post",
+         "parameters": [
+           {
+             "name": "interview_id",
+@@ -4434,6 +4288,82 @@
+             }
+           },
+           {
++            "name": "turn_id",
++            "in": "path",
++            "required": true,
++            "schema": {
++              "type": "string",
++              "title": "Turn Id"
++            }
++          },
++          {
++            "name": "idempotency-key",
++            "in": "header",
++            "required": true,
++            "schema": {
++              "type": "string",
++              "title": "Idempotency-Key"
++            }
++          },
++          {
++            "name": "authorization",
++            "in": "header",
++            "required": false,
++            "schema": {
++              "type": "string",
++              "default": "",
++              "title": "Authorization"
++            }
++          }
++        ],
++        "requestBody": {
++          "required": true,
++          "content": {
++            "application/json": {
++              "schema": {
++                "$ref": "#/components/schemas/Answer"
++              }
++            }
++          }
++        },
++        "responses": {
++          "200": {
++            "description": "Successful Response",
++            "content": {
++              "application/json": {
++                "schema": {}
++              }
++            }
++          },
++          "422": {
++            "description": "Validation Error",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/HTTPValidationError"
++                }
++              }
++            }
++          }
++        }
++      }
++    },
++    "/api/v1/interviews/{interview_id}/report/regenerate": {
++      "post": {
++        "tags": ["面试与报告"],
++        "summary": "Regenerate",
++        "operationId": "regenerate_api_v1_interviews__interview_id__report_regenerate_post",
++        "parameters": [
++          {
++            "name": "interview_id",
++            "in": "path",
++            "required": true,
++            "schema": {
++              "type": "string",
++              "title": "Interview Id"
++            }
++          },
++          {
+             "name": "idempotency-key",
+             "in": "header",
+             "required": true,
+@@ -4479,9 +4409,7 @@
+     },
+     "/api/v1/media": {
+       "get": {
+-        "tags": [
+-          "媒体与异步任务"
+-        ],
++        "tags": ["媒体与异步任务"],
+         "summary": "List Media",
+         "operationId": "list_media_api_v1_media_get",
+         "parameters": [
+@@ -4577,9 +4505,7 @@
+     },
+     "/api/v1/media/upload-url": {
+       "post": {
+-        "tags": [
+-          "媒体与异步任务"
+-        ],
++        "tags": ["媒体与异步任务"],
+         "summary": "Upload",
+         "operationId": "upload_api_v1_media_upload_url_post",
+         "parameters": [
+@@ -4630,9 +4556,7 @@
+     },
+     "/api/v1/media/{asset_id}/complete": {
+       "post": {
+-        "tags": [
+-          "媒体与异步任务"
+-        ],
++        "tags": ["媒体与异步任务"],
+         "summary": "Complete",
+         "operationId": "complete_api_v1_media__asset_id__complete_post",
+         "parameters": [
+@@ -4692,9 +4616,7 @@
+     },
+     "/api/v1/media/{asset_id}": {
+       "get": {
+-        "tags": [
+-          "媒体与异步任务"
+-        ],
++        "tags": ["媒体与异步任务"],
+         "summary": "Media",
+         "operationId": "media_api_v1_media__asset_id__get",
+         "parameters": [
+@@ -4742,9 +4664,7 @@
+         }
+       },
+       "delete": {
+-        "tags": [
+-          "媒体与异步任务"
+-        ],
++        "tags": ["媒体与异步任务"],
+         "summary": "Delete Media",
+         "operationId": "delete_media_api_v1_media__asset_id__delete",
+         "parameters": [
+@@ -4794,9 +4714,7 @@
+     },
+     "/api/v1/tasks/{task_id}": {
+       "get": {
+-        "tags": [
+-          "媒体与异步任务"
+-        ],
++        "tags": ["媒体与异步任务"],
+         "summary": "Task",
+         "operationId": "task_api_v1_tasks__task_id__get",
+         "parameters": [
+@@ -4846,9 +4764,7 @@
+     },
+     "/api/v1/tasks/{task_id}/retry": {
+       "post": {
+-        "tags": [
+-          "媒体与异步任务"
+-        ],
++        "tags": ["媒体与异步任务"],
+         "summary": "Retry",
+         "operationId": "retry_api_v1_tasks__task_id__retry_post",
+         "parameters": [
+@@ -4898,9 +4814,7 @@
+     },
+     "/api/v1/billing/products": {
+       "get": {
+-        "tags": [
+-          "权益与订单"
+-        ],
++        "tags": ["权益与订单"],
+         "summary": "Products",
+         "operationId": "products_api_v1_billing_products_get",
+         "parameters": [
+@@ -4941,9 +4855,7 @@
+     },
+     "/api/v1/billing/entitlements": {
+       "get": {
+-        "tags": [
+-          "权益与订单"
+-        ],
++        "tags": ["权益与订单"],
+         "summary": "Entitlements",
+         "operationId": "entitlements_api_v1_billing_entitlements_get",
+         "parameters": [
+@@ -4984,9 +4896,7 @@
+     },
+     "/api/v1/billing/usage": {
+       "get": {
+-        "tags": [
+-          "权益与订单"
+-        ],
++        "tags": ["权益与订单"],
+         "summary": "Usage",
+         "operationId": "usage_api_v1_billing_usage_get",
+         "parameters": [
+@@ -5050,9 +4960,7 @@
+     },
+     "/api/v1/billing/orders": {
+       "post": {
+-        "tags": [
+-          "权益与订单"
+-        ],
++        "tags": ["权益与订单"],
+         "summary": "Create Order",
+         "operationId": "create_order_api_v1_billing_orders_post",
+         "parameters": [
+@@ -5110,9 +5018,7 @@
+         }
+       },
+       "get": {
+-        "tags": [
+-          "权益与订单"
+-        ],
++        "tags": ["权益与订单"],
+         "summary": "Orders",
+         "operationId": "orders_api_v1_billing_orders_get",
+         "parameters": [
+@@ -5176,9 +5082,7 @@
+     },
+     "/api/v1/billing/orders/{order_id}": {
+       "get": {
+-        "tags": [
+-          "权益与订单"
+-        ],
++        "tags": ["权益与订单"],
+         "summary": "Order",
+         "operationId": "order_api_v1_billing_orders__order_id__get",
+         "parameters": [
+@@ -5228,9 +5132,7 @@
+     },
+     "/api/v1/billing/orders/{order_id}/dev-pay": {
+       "post": {
+-        "tags": [
+-          "权益与订单"
+-        ],
++        "tags": ["权益与订单"],
+         "summary": "Dev Pay",
+         "operationId": "dev_pay_api_v1_billing_orders__order_id__dev_pay_post",
+         "parameters": [
+@@ -5289,9 +5191,7 @@
+     },
+     "/api/v1/billing/orders/{order_id}/refund": {
+       "post": {
+-        "tags": [
+-          "权益与订单"
+-        ],
++        "tags": ["权益与订单"],
+         "summary": "Refund",
+         "operationId": "refund_api_v1_billing_orders__order_id__refund_post",
+         "parameters": [
+@@ -5350,9 +5250,7 @@
+     },
+     "/api/v1/feedback": {
+       "post": {
+-        "tags": [
+-          "运营与反馈"
+-        ],
++        "tags": ["运营与反馈"],
+         "summary": "Feedback",
+         "operationId": "feedback_api_v1_feedback_post",
+         "parameters": [
+@@ -5401,9 +5299,7 @@
+         }
+       },
+       "get": {
+-        "tags": [
+-          "运营与反馈"
+-        ],
++        "tags": ["运营与反馈"],
+         "summary": "My Feedback",
+         "operationId": "my_feedback_api_v1_feedback_get",
+         "parameters": [
+@@ -5467,9 +5363,7 @@
+     },
+     "/api/v1/admin/feedback/{feedback_id}": {
+       "patch": {
+-        "tags": [
+-          "运营与反馈"
+-        ],
++        "tags": ["运营与反馈"],
+         "summary": "Reply",
+         "operationId": "reply_api_v1_admin_feedback__feedback_id__patch",
+         "parameters": [
+@@ -5529,9 +5423,7 @@
+     },
+     "/api/v1/admin/stats": {
+       "get": {
+-        "tags": [
+-          "运营与反馈"
+-        ],
++        "tags": ["运营与反馈"],
+         "summary": "Stats",
+         "operationId": "stats_api_v1_admin_stats_get",
+         "parameters": [
+@@ -5572,9 +5464,7 @@
+     },
+     "/api/v1/admin/ai-calls": {
+       "get": {
+-        "tags": [
+-          "运营与反馈"
+-        ],
++        "tags": ["运营与反馈"],
+         "summary": "Ai Calls",
+         "operationId": "ai_calls_api_v1_admin_ai_calls_get",
+         "parameters": [
+@@ -5638,9 +5528,7 @@
+     },
+     "/api/v1/admin/business-audit-logs": {
+       "get": {
+-        "tags": [
+-          "运营与反馈"
+-        ],
++        "tags": ["运营与反馈"],
+         "summary": "Audits",
+         "operationId": "audits_api_v1_admin_business_audit_logs_get",
+         "parameters": [
+@@ -5740,12 +5628,7 @@
+         },
+         "additionalProperties": false,
+         "type": "object",
+-        "required": [
+-          "login_name",
+-          "display_name",
+-          "password",
+-          "role"
+-        ],
++        "required": ["login_name", "display_name", "password", "role"],
+         "title": "AdminCreate"
+       },
+       "AdminLogin": {
+@@ -5777,10 +5660,7 @@
+         },
+         "additionalProperties": false,
+         "type": "object",
+-        "required": [
+-          "login_name",
+-          "password"
+-        ],
++        "required": ["login_name", "password"],
+         "title": "AdminLogin"
+       },
+       "AdminUpdate": {
+@@ -5793,10 +5673,7 @@
+           },
+           "status": {
+             "type": "string",
+-            "enum": [
+-              "ACTIVE",
+-              "DISABLED"
+-            ],
++            "enum": ["ACTIVE", "DISABLED"],
+             "title": "Status"
+           },
+           "role": {
+@@ -5814,11 +5691,7 @@
+         },
+         "additionalProperties": false,
+         "type": "object",
+-        "required": [
+-          "reason",
+-          "status",
+-          "role"
+-        ],
++        "required": ["reason", "status", "role"],
+         "title": "AdminUpdate"
+       },
+       "Answer": {
+@@ -5875,6 +5748,18 @@
+               }
+             ],
+             "title": "Client Duration Ms"
++          },
++          "live_transcript_id": {
++            "anyOf": [
++              {
++                "type": "string",
++                "maxLength": 36
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "title": "Live Transcript Id"
+           }
+         },
+         "additionalProperties": false,
+@@ -5905,10 +5790,7 @@
+         },
+         "additionalProperties": false,
+         "type": "object",
+-        "required": [
+-          "consent_type",
+-          "policy_version"
+-        ],
++        "required": ["consent_type", "policy_version"],
+         "title": "ConsentInput"
+       },
+       "DevLogin": {
+@@ -5928,9 +5810,7 @@
+         },
+         "additionalProperties": false,
+         "type": "object",
+-        "required": [
+-          "identity"
+-        ],
++        "required": ["identity"],
+         "title": "DevLogin"
+       },
+       "EntitlementGrant": {
+@@ -5952,14 +5832,17 @@
+             "maxLength": 100,
+             "title": "Ticket",
+             "default": ""
++          },
++          "mode": {
++            "type": "string",
++            "enum": ["TEXT", "VOICE", "VIDEO", "UNIVERSAL"],
++            "title": "Mode",
++            "default": "UNIVERSAL"
+           }
+         },
+         "additionalProperties": false,
+         "type": "object",
+-        "required": [
+-          "reason",
+-          "quantity"
+-        ],
++        "required": ["reason", "quantity"],
+         "title": "EntitlementGrant"
+       },
+       "Envelope": {
+@@ -5983,9 +5866,7 @@
+           }
+         },
+         "type": "object",
+-        "required": [
+-          "request_id"
+-        ],
++        "required": ["request_id"],
+         "title": "Envelope"
+       },
+       "FeedbackInput": {
+@@ -6003,12 +5884,7 @@
+           },
+           "category": {
+             "type": "string",
+-            "enum": [
+-              "CONTENT",
+-              "REPORT",
+-              "PRIVACY",
+-              "OTHER"
+-            ],
++            "enum": ["CONTENT", "REPORT", "PRIVACY", "OTHER"],
+             "title": "Category",
+             "default": "OTHER"
+           },
+@@ -6021,20 +5897,14 @@
+         },
+         "additionalProperties": false,
+         "type": "object",
+-        "required": [
+-          "content"
+-        ],
++        "required": ["content"],
+         "title": "FeedbackInput"
+       },
+       "FeedbackReply": {
+         "properties": {
+           "status": {
+             "type": "string",
+-            "enum": [
+-              "IN_REVIEW",
+-              "RESOLVED",
+-              "REJECTED"
+-            ],
++            "enum": ["IN_REVIEW", "RESOLVED", "REJECTED"],
+             "title": "Status"
+           },
+           "reply": {
+@@ -6046,21 +5916,14 @@
+         },
+         "additionalProperties": false,
+         "type": "object",
+-        "required": [
+-          "status",
+-          "reply"
+-        ],
++        "required": ["status", "reply"],
+         "title": "FeedbackReply"
+       },
+       "Finish": {
+         "properties": {
+           "reason": {
+             "type": "string",
+-            "enum": [
+-              "USER",
+-              "TIME_LIMIT",
+-              "QUESTION_LIMIT"
+-            ],
++            "enum": ["USER", "TIME_LIMIT", "QUESTION_LIMIT"],
+             "title": "Reason",
+             "default": "USER"
+           }
+@@ -6086,31 +5949,19 @@
+         "properties": {
+           "mode": {
+             "type": "string",
+-            "enum": [
+-              "TEXT",
+-              "VOICE",
+-              "VIDEO"
+-            ],
++            "enum": ["TEXT", "VOICE", "VIDEO"],
+             "title": "Mode",
+             "default": "VOICE"
+           },
+           "duration_minutes": {
+             "type": "integer",
+-            "enum": [
+-              15,
+-              30,
+-              45
+-            ],
++            "enum": [15, 30, 45],
+             "title": "Duration Minutes",
+             "default": 15
+           },
+           "difficulty": {
+             "type": "string",
+-            "enum": [
+-              "EASY",
+-              "MEDIUM",
+-              "HARD"
+-            ],
++            "enum": ["EASY", "MEDIUM", "HARD"],
+             "title": "Difficulty",
+             "default": "MEDIUM"
+           },
+@@ -6123,10 +5974,7 @@
+           },
+           "language": {
+             "type": "string",
+-            "enum": [
+-              "zh-CN",
+-              "en-US"
+-            ],
++            "enum": ["zh-CN", "en-US"],
+             "title": "Language",
+             "default": "zh-CN"
+           },
+@@ -6151,11 +5999,7 @@
+           },
+           "interview_type": {
+             "type": "string",
+-            "enum": [
+-              "COMPREHENSIVE",
+-              "TECHNICAL",
+-              "BEHAVIORAL"
+-            ],
++            "enum": ["COMPREHENSIVE", "TECHNICAL", "BEHAVIORAL"],
+             "title": "Interview Type",
+             "default": "COMPREHENSIVE"
+           }
+@@ -6187,9 +6031,7 @@
+         },
+         "additionalProperties": false,
+         "type": "object",
+-        "required": [
+-          "job_profile_id"
+-        ],
++        "required": ["job_profile_id"],
+         "title": "InterviewInput"
+       },
+       "JobInput": {
+@@ -6208,22 +6050,14 @@
+           },
+           "seniority": {
+             "type": "string",
+-            "enum": [
+-              "JUNIOR",
+-              "MIDDLE",
+-              "SENIOR",
+-              "EXPERT"
+-            ],
++            "enum": ["JUNIOR", "MIDDLE", "SENIOR", "EXPERT"],
+             "title": "Seniority",
+             "default": "MIDDLE"
+           }
+         },
+         "additionalProperties": false,
+         "type": "object",
+-        "required": [
+-          "job_title",
+-          "jd_text"
+-        ],
++        "required": ["job_title", "jd_text"],
+         "title": "JobInput"
+       },
+       "Login": {
+@@ -6243,9 +6077,7 @@
+         },
+         "additionalProperties": false,
+         "type": "object",
+-        "required": [
+-          "code"
+-        ],
++        "required": ["code"],
+         "title": "Login"
+       },
+       "MFAConfirm": {
+@@ -6265,11 +6097,36 @@
+         },
+         "additionalProperties": false,
+         "type": "object",
+-        "required": [
+-          "secret",
+-          "code"
+-        ],
++        "required": ["secret", "code"],
+         "title": "MFAConfirm"
++      },
++      "ModeCredits": {
++        "properties": {
++          "TEXT": {
++            "type": "integer",
++            "maximum": 10000.0,
++            "minimum": 0.0,
++            "title": "Text",
++            "default": 0
++          },
++          "VOICE": {
++            "type": "integer",
++            "maximum": 10000.0,
++            "minimum": 0.0,
++            "title": "Voice",
++            "default": 0
++          },
++          "VIDEO": {
++            "type": "integer",
++            "maximum": 10000.0,
++            "minimum": 0.0,
++            "title": "Video",
++            "default": 0
++          }
++        },
++        "additionalProperties": false,
++        "type": "object",
++        "title": "ModeCredits"
+       },
+       "OrderInput": {
+         "properties": {
+@@ -6282,9 +6139,7 @@
+         },
+         "additionalProperties": false,
+         "type": "object",
+-        "required": [
+-          "product_code"
+-        ],
++        "required": ["product_code"],
+         "title": "OrderInput"
+       },
+       "PaymentInput": {
+@@ -6297,10 +6152,7 @@
+           },
+           "environment": {
+             "type": "string",
+-            "enum": [
+-              "sandbox",
+-              "production"
+-            ],
++            "enum": ["sandbox", "production"],
+             "title": "Environment",
+             "default": "sandbox"
+           },
+@@ -6367,13 +6219,7 @@
+           },
+           "kind": {
+             "type": "string",
+-            "enum": [
+-              "SINGLE",
+-              "MONTH",
+-              "QUARTER",
+-              "YEAR",
+-              "PACK"
+-            ],
++            "enum": ["SINGLE", "MONTH", "QUARTER", "YEAR", "PACK"],
+             "title": "Kind"
+           },
+           "amount_minor": {
+@@ -6389,10 +6235,27 @@
+             "title": "Original Minor"
+           },
+           "credits": {
+-            "type": "integer",
+-            "maximum": 10000.0,
+-            "minimum": 1.0,
++            "anyOf": [
++              {
++                "type": "integer",
++                "maximum": 10000.0,
++                "minimum": 1.0
++              },
++              {
++                "type": "null"
++              }
++            ],
+             "title": "Credits"
++          },
++          "interview_credits": {
++            "anyOf": [
++              {
++                "$ref": "#/components/schemas/ModeCredits"
++              },
++              {
++                "type": "null"
++              }
++            ]
+           },
+           "validity_days": {
+             "type": "integer",
+@@ -6416,7 +6279,6 @@
+           "kind",
+           "amount_minor",
+           "original_minor",
+-          "credits",
+           "validity_days"
+         ],
+         "title": "ProductInput"
+@@ -6444,23 +6306,14 @@
+         },
+         "additionalProperties": false,
+         "type": "object",
+-        "required": [
+-          "reason",
+-          "interview_id",
+-          "assignee_id"
+-        ],
++        "required": ["reason", "interview_id", "assignee_id"],
+         "title": "QualityInput"
+       },
+       "QualityUpdate": {
+         "properties": {
+           "status": {
+             "type": "string",
+-            "enum": [
+-              "PENDING",
+-              "IN_REVIEW",
+-              "COMPLETED",
+-              "NEEDS_FIX"
+-            ],
++            "enum": ["PENDING", "IN_REVIEW", "COMPLETED", "NEEDS_FIX"],
+             "title": "Status"
+           },
+           "tags": {
+@@ -6488,10 +6341,7 @@
+         },
+         "additionalProperties": false,
+         "type": "object",
+-        "required": [
+-          "status",
+-          "conclusion"
+-        ],
++        "required": ["status", "conclusion"],
+         "title": "QualityUpdate"
+       },
+       "Reason": {
+@@ -6505,9 +6355,7 @@
+         },
+         "additionalProperties": false,
+         "type": "object",
+-        "required": [
+-          "reason"
+-        ],
++        "required": ["reason"],
+         "title": "Reason"
+       },
+       "ReconciliationInput": {
+@@ -6520,11 +6368,7 @@
+           },
+           "channel": {
+             "type": "string",
+-            "enum": [
+-              "WECHAT",
+-              "ALIPAY",
+-              "DEV"
+-            ],
++            "enum": ["WECHAT", "ALIPAY", "DEV"],
+             "title": "Channel"
+           },
+           "bill_date": {
+@@ -6545,12 +6389,7 @@
+         },
+         "additionalProperties": false,
+         "type": "object",
+-        "required": [
+-          "reason",
+-          "channel",
+-          "bill_date",
+-          "rows"
+-        ],
++        "required": ["reason", "channel", "bill_date", "rows"],
+         "title": "ReconciliationInput"
+       },
+       "ReconciliationRow": {
+@@ -6569,20 +6408,13 @@
+           },
+           "status": {
+             "type": "string",
+-            "enum": [
+-              "PAID",
+-              "REFUNDED"
+-            ],
++            "enum": ["PAID", "REFUNDED"],
+             "title": "Status"
+           }
+         },
+         "additionalProperties": false,
+         "type": "object",
+-        "required": [
+-          "order_id",
+-          "amount_minor",
+-          "status"
+-        ],
++        "required": ["order_id", "amount_minor", "status"],
+         "title": "ReconciliationRow"
+       },
+       "RefundInput": {
+@@ -6602,10 +6434,7 @@
+         },
+         "additionalProperties": false,
+         "type": "object",
+-        "required": [
+-          "reason",
+-          "order_id"
+-        ],
++        "required": ["reason", "order_id"],
+         "title": "RefundInput"
+       },
+       "UploadComplete": {
+@@ -6667,7 +6496,8 @@
+               "RESUME",
+               "JD_IMAGE",
+               "SESSION_AUDIO",
+-              "SESSION_VIDEO"
++              "SESSION_VIDEO",
++              "SESSION_CAPTIONS"
+             ],
+             "title": "Media Type",
+             "default": "AUDIO"
+@@ -6710,11 +6540,7 @@
+         },
+         "additionalProperties": false,
+         "type": "object",
+-        "required": [
+-          "filename",
+-          "content_type",
+-          "size"
+-        ],
++        "required": ["filename", "content_type", "size"],
+         "title": "UploadInput"
+       },
+       "UserPatch": {
+@@ -6728,9 +6554,7 @@
+         },
+         "additionalProperties": false,
+         "type": "object",
+-        "required": [
+-          "nickname"
+-        ],
++        "required": ["nickname"],
+         "title": "UserPatch"
+       },
+       "UserStatus": {
+@@ -6743,19 +6567,13 @@
+           },
+           "status": {
+             "type": "string",
+-            "enum": [
+-              "ACTIVE",
+-              "FROZEN"
+-            ],
++            "enum": ["ACTIVE", "FROZEN"],
+             "title": "Status"
+           }
+         },
+         "additionalProperties": false,
+         "type": "object",
+-        "required": [
+-          "reason",
+-          "status"
+-        ],
++        "required": ["reason", "status"],
+         "title": "UserStatus"
+       },
+       "ValidationError": {
+@@ -6791,13 +6609,9 @@
+           }
+         },
+         "type": "object",
+-        "required": [
+-          "loc",
+-          "msg",
+-          "type"
+-        ],
++        "required": ["loc", "msg", "type"],
+         "title": "ValidationError"
+       }
+     }
+   }
+-}
+\ No newline at end of file
++}
+--- a/README.md
++++ b/README.md
+@@ -39,3 +39,5 @@
+ - 月/季/年商品当前为一次性额度包；有效期可配置，但周期重置、额度到期回收、自动续费未实现，页面明确提示。
+ - AI 运营展示已配置模型及调用成本，在线模型配置发布、预算告警通知、大范围异步导出与压测待后续完成。
+ - 媒体短时授权要求权限、用户当前 `SUPPORT_REVIEW` 同意、资源分派及保留期限；不会由后台替用户同意。
++
++商品按文字、语音、视频分别配置次数，可发布 3 次文字 + 2 次语音 + 1 次视频等组合。用户详情显示分类及历史通用余额，补发时选择面试类型；订单管理显示购买时的组合快照。后端需迁移到 b72e4f6d9102，历史通用权益保留兼容。

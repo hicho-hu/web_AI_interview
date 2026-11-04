@@ -1,0 +1,1177 @@
+diff --git a/.env.example b/.env.example
+--- a/.env.example
++++ b/.env.example
+@@ -38,3 +38,9 @@
+ # S3_ACCESS_KEY=
+ # S3_SECRET_KEY=
+ # ADMIN_USER_IDS=<comma-separated user UUIDs>
++
++# Qwen 实时转写：复用服务端 Provider Key；不发送密钥到浏览器。
++REALTIME_ASR_ENABLED=true
++REALTIME_ASR_MODEL=qwen3-asr-flash-realtime
++# 可留空，根据已有 DashScope WebSocket / Compatible 地址推导同地域地址。
++REALTIME_ASR_URL=
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1,4 +1,6 @@
+ # AI 模拟面试后端
++
++语音/视频连续面试新增：即时执行回答、SSE 流式追问、Qwen 实时字幕、24 kHz PCM 语音首包播放及整场 WebVTT 字幕保存。协议、恢复策略及配置见 [低延迟面试](docs/live-conversation.md)。
+ 
+ 基于所提供三份 V1.0 文档实现的模块化单体，数据库按后续要求切换为 **MySQL 8.4 + Redis**。FastAPI + Pydantic v2 + SQLAlchemy 2 + Alembic；媒体使用 S3/COS 兼容私有对象存储。生产运行时 Python 3.12，本机 Python 3.9 也可运行开发测试。
+ 
+diff --git a/app/api/dependencies.py b/app/api/dependencies.py
+--- a/app/api/dependencies.py
++++ b/app/api/dependencies.py
+@@ -11,7 +11,7 @@
+     rt = request.app.state.runtime
+     with rt.db.session() as session:
+         yield session
+-    if rt.settings.task_mode == "eager":
++    if rt.settings.task_mode == "eager" and not request.url.path.endswith("/submit-stream"):
+         rt.drain()
+ 
+ 
+@@ -42,11 +42,18 @@
+ def admin_user(request: Request, db=Depends(db_session, scope="function"), authorization: str = Header("")):
+     from app.modules.admin.auth import AdminAuth
+     from app.modules.admin.security import permits
++
+     require(authorization.startswith("Bearer "), "ADMIN_UNAUTHORIZED", "请登录管理后台", 401)
+     admin, _ = AdminAuth(request.app.state.runtime, db, request).authenticate(authorization[7:])
+-    permission = ("user:update" if "/feedback/" in request.url.path else
+-                  "ai:read" if request.url.path.endswith("ai-calls") else
+-                  "audit:read" if request.url.path.endswith("business-audit-logs") else "dashboard:read")
++    permission = (
++        "user:update"
++        if "/feedback/" in request.url.path
++        else "ai:read"
++        if request.url.path.endswith("ai-calls")
++        else "audit:read"
++        if request.url.path.endswith("business-audit-logs")
++        else "dashboard:read"
++    )
+     require(permits(admin, permission), "ADMIN_FORBIDDEN", "无操作权限", 403)
+     return admin
+ 
+diff --git a/app/api/interviews.py b/app/api/interviews.py
+--- a/app/api/interviews.py
++++ b/app/api/interviews.py
+@@ -1,7 +1,8 @@
+ from datetime import datetime
+ from typing import Optional
+ 
+-from fastapi import APIRouter, Depends, Header, Query, Request
++from fastapi import APIRouter, Depends, Header, Query, Request, WebSocket
++from fastapi.responses import StreamingResponse
+ from sqlalchemy import select
+ 
+ from app.api.dependencies import current_user, db_session, ok, service
+@@ -12,6 +13,13 @@
+ from app.workers.processor import retry_task
+ 
+ router = APIRouter(tags=["面试与报告"])
++
++
++@router.websocket("/interviews/{interview_id}/live-transcription")
++async def live_transcription(websocket: WebSocket, interview_id: str):
++    from app.modules.interview.transcription import transcribe_socket
++
++    await transcribe_socket(websocket, interview_id)
+ 
+ 
+ @router.post("/interviews", response_model=Envelope, status_code=201)
+@@ -155,6 +163,37 @@
+     return ok(request, svc.report(svc.get(interview_id), version))
+ 
+ 
++@router.post("/interviews/{interview_id}/turns/{turn_id}/submit-stream")
++def answer_stream(
++    interview_id: str,
++    turn_id: str,
++    data: Answer,
++    request: Request,
++    idempotency_key: str = Header(...),
++    db=Depends(db_session, scope="function"),
++    user=Depends(current_user),
++):
++    from app.modules.interview.live import answer_events
++
++    svc = service(InterviewService, request, db, user)
++    result = svc.submit(svc.get(interview_id), turn_id, data, idempotency_key)
++    # Reserve this task for the immediate stream runner. If the API dies before
++    # starting it, the normal outbox recovers it after the short lease expires.
++    from datetime import timedelta
++
++    from app.core.security import utcnow
++
++    task = db.get(Task, result["task_id"])
++    if task.status == "PENDING":
++        task.status = "QUEUED"
++        task.lease_until = utcnow() + timedelta(seconds=30)
++    return StreamingResponse(
++        answer_events(svc.rt, user.id, interview_id, result["task_id"], request.state.request_id),
++        media_type="text/event-stream",
++        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-store"},
++    )
++
++
+ @router.post("/interviews/{interview_id}/report/regenerate", response_model=Envelope, status_code=202)
+ def regenerate(
+     interview_id: str,
+diff --git a/app/core/config.py b/app/core/config.py
+--- a/app/core/config.py
++++ b/app/core/config.py
+@@ -27,6 +27,9 @@
+     provider_model: str = "configured-model"
+     asr_model: str = "whisper-1"
+     asr_provider: Literal["compatible", "qwen"] = "compatible"
++    realtime_asr_enabled: bool = True
++    realtime_asr_model: str = "qwen3-asr-flash-realtime"
++    realtime_asr_url: str = ""
+     tts_model: str = "tts-1"
+     tts_voice: str = "alloy"
+     tts_provider: Literal["compatible", "dashscope"] = "compatible"
+@@ -52,7 +55,9 @@
+     s3_secret_key: str = ""
+     admin_user_ids: str = ""
+     rate_limit_per_minute: int = Field(120, ge=1)
+-    cors_origins: str = "http://localhost:3000,http://localhost:5173,http://localhost:5174,http://127.0.0.1:5174"
++    cors_origins: str = (
++        "http://localhost:3000,http://localhost:5173,http://localhost:5174,http://127.0.0.1:5174"
++    )
+     max_upload_bytes: int = 32 * 1024 * 1024
+     ffmpeg_bin: str = "ffmpeg"
+     ffprobe_bin: str = "ffprobe"
+@@ -60,6 +65,8 @@
+ 
+     @model_validator(mode="after")
+     def production_guards(self):
++        if self.realtime_asr_url and not self.realtime_asr_url.startswith("wss://"):
++            raise ValueError("实时转写必须使用 WSS 地址")
+         if self.asr_provider == "qwen" and (
+             self.provider_mode != "compatible"
+             or not self.provider_url.startswith("https://")
+diff --git a/app/modules/ai_engine/service.py b/app/modules/ai_engine/service.py
+--- a/app/modules/ai_engine/service.py
++++ b/app/modules/ai_engine/service.py
+@@ -10,6 +10,7 @@
+ from app.modules.interview.service import InterviewService
+ from app.modules.shared import Service
+ from app.providers.ai import decode_audio
++from app.providers.live import audio_turn, live_sink, publish
+ from app.schemas.contracts import Decision, Plan, SynthesizedAudio, Transcript
+ 
+ 
+@@ -81,28 +82,46 @@
+         )
+         self.db.add(turn)
+         self.db.flush()
++        if live_sink.get():
++            self.rt.cache.put(
++                f"live-turn:{self.uid}:{turn.id}", self.encrypt_json({"interview_id": row.id}), 120
++            )
++        publish(
++            "question",
++            turn_id=turn.id,
++            text=question["text"],
++            main_index=main_index,
++            turn_no=turn.turn_no,
++            turn_type=kind,
++            competency=turn.competency,
++        )
+         if row.mode != "TEXT":
+-            output = self.rt.ai(
+-                self.db,
+-                self.uid,
+-                "tts",
+-                {"text": question["text"], "language": row.config_json["language"]},
+-                SynthesizedAudio,
+-                row.id,
+-                turn.id,
+-                self.rid,
+-            )
++            token = audio_turn.set(turn.id)
++            try:
++                output = self.rt.ai(
++                    self.db,
++                    self.uid,
++                    "tts",
++                    {"text": question["text"], "language": row.config_json["language"]},
++                    SynthesizedAudio,
++                    row.id,
++                    turn.id,
++                    self.rid,
++                )
++            finally:
++                audio_turn.reset(token)
+             audio = decode_audio(output["audio_base64"])
+             if audio:
+                 require(
+-                    len(audio) <= 10 * 1024 * 1024 and output.get("mime_type") == "audio/mpeg",
++                    len(audio) <= 10 * 1024 * 1024 and output.get("mime_type") in ("audio/mpeg", "audio/wav"),
+                     "AI_OUTPUT_INVALID",
+                     "TTS 音频格式或大小无效",
+                     502,
+                 )
+                 asset_id = new_id()
+-                key = f"{self.rt.settings.environment}/users/{self.uid}/tts/{asset_id}.mp3"
+-                self.rt.storage.put(key, audio, "audio/mpeg")
++                extension = "wav" if output["mime_type"] == "audio/wav" else "mp3"
++                key = f"{self.rt.settings.environment}/users/{self.uid}/tts/{asset_id}.{extension}"
++                self.rt.storage.put(key, audio, output["mime_type"])
+                 asset = MediaAsset(
+                     id=asset_id,
+                     user_id=self.uid,
+@@ -110,8 +129,8 @@
+                     turn_id=turn.id,
+                     media_type="TTS",
+                     object_key=key,
+-                    filename=f"{asset_id}.mp3",
+-                    mime_type="audio/mpeg",
++                    filename=f"{asset_id}.{extension}",
++                    mime_type=output["mime_type"],
+                     size_bytes=len(audio),
+                     status="READY",
+                     expires_at=utcnow() + timedelta(days=self.rt.settings.media_retention_days),
+@@ -119,6 +138,7 @@
+                 self.db.add(asset)
+                 self.db.flush()
+                 turn.question_asset_id = asset.id
++        publish("audio_end", turn_id=turn.id)
+         return turn
+ 
+     def answer(self, row, turn, payload=None):
+@@ -126,6 +146,7 @@
+             return {"status": row.status, "turn_id": turn.id}
+         IdentityService(self.rt, self.db, self.uid).require_consents("PRIVACY", "TERMS", "AI_PROCESSING")
+         if not turn.transcript_encrypted:
++            publish("transcribing", turn_id=turn.id)
+             asset_ids = (payload or {}).get("asset_ids") or [turn.answer_asset_id]
+             transcripts = []
+             for asset_id in asset_ids:
+@@ -140,6 +161,8 @@
+             checkpoints = checkpoint_buffer.get()
+             if checkpoints is not None:
+                 checkpoints.append((turn.id, turn.transcript_encrypted, turn.confidence))
++        publish("transcript", turn_id=turn.id, text=self.rt.security.decrypt(turn.transcript_encrypted))
++        publish("thinking", turn_id=turn.id)
+         return self.decide(row, turn)
+ 
+     def transcribe(self, row, turn, asset_id):
+diff --git a/app/modules/interview/live.py b/app/modules/interview/live.py
+new file mode 100644
+--- /dev/null
++++ b/app/modules/interview/live.py
+@@ -0,0 +1,74 @@
++"""Run a durable answer task immediately and stream its progress without polling gaps."""
++
++import json
++import queue
++import threading
++import time
++
++from app.db.models import Interview, Task
++from app.modules.interview.service import InterviewService
++from app.providers.live import live_sink
++from app.workers.processor import process_task
++
++slots = threading.BoundedSemaphore(8)
++
++
++def answer_events(rt, uid, interview_id, task_id, request_id):
++    events = queue.Queue(maxsize=128)
++    detached, finished = threading.Event(), threading.Event()
++    started = time.monotonic()
++
++    def emit(value):
++        while not detached.is_set():
++            try:
++                events.put({**value, "elapsed_ms": round((time.monotonic() - started) * 1000)}, timeout=0.2)
++                return
++            except queue.Full:
++                continue
++
++    def work():
++        token = live_sink.set(emit)
++        try:
++            process_task(rt, task_id)
++        finally:
++            live_sink.reset(token)
++            finished.set()
++            slots.release()
++        if rt.settings.task_mode == "eager":
++            rt.drain()
++
++    def encode(event):
++        return "data: " + json.dumps(event, ensure_ascii=False, default=str) + "\n\n"
++
++    yield encode({"type": "accepted", "task_id": task_id})
++    if not slots.acquire(blocking=False):
++        with rt.db.session() as db:
++            task = db.get(Task, task_id)
++            if task.status == "QUEUED":
++                task.status, task.lease_until = "PENDING", None
++        yield encode({"type": "deferred", "task_id": task_id})
++        return
++    threading.Thread(target=work, daemon=True, name="live-interview-answer").start()
++    try:
++        while not finished.is_set() or not events.empty():
++            try:
++                yield encode(events.get(timeout=2))
++            except queue.Empty:
++                yield ": heartbeat\n\n"
++        # Another worker can have claimed this task first. Its normal outbox retry
++        # and the client's fallback polling remain available after a disconnection.
++        with rt.db.session() as db:
++            task = db.get(Task, task_id)
++            row = db.get(Interview, interview_id)
++            if row and row.user_id == uid and not row.deleted_at:
++                snapshot = InterviewService(rt, db, uid, request_id).view(row)
++                yield encode(
++                    {
++                        "type": "complete" if task.status == "SUCCEEDED" else "deferred",
++                        "task_id": task_id,
++                        "task_status": task.status,
++                        "interview": snapshot,
++                    }
++                )
++    finally:
++        detached.set()
+diff --git a/app/modules/interview/service.py b/app/modules/interview/service.py
+--- a/app/modules/interview/service.py
++++ b/app/modules/interview/service.py
+@@ -100,6 +100,7 @@
+             "prepare_task_id": row.prepare_task_id,
+             "report_task_id": row.report_task_id,
+             "failure_code": row.failure_code,
++            "conversation_features": self.conversation_features(row),
+         }
+ 
+     def turn_view(self, turn):
+@@ -121,6 +122,14 @@
+             "task_id": turn.task_id,
+             "question_audio": media.view(question_asset) if question_asset else None,
+             "answer_media": media.view(answer_asset) if answer_asset else None,
++        }
++
++    def conversation_features(self, row):
++        from app.providers.qwen_realtime import endpoint
++
++        return {
++            "streaming_answers": row.mode != "TEXT",
++            "live_transcription": bool(endpoint(self.rt.settings)),
+         }
+ 
+     def start(self, row):
+@@ -185,6 +194,13 @@
+                     "提交时长不一致",
+                 )
+                 turn.answer_asset_id = asset.id
++                if len(assets) == 1 and data.live_transcript_id:
++                    from app.modules.interview.transcription import verified_transcript
++
++                    text = verified_transcript(self.rt, self.uid, turn.id, data.live_transcript_id, asset)
++                    if text:
++                        turn.transcript_encrypted = self.rt.security.encrypt(text)
++                        turn.confidence = None
+                 require(
+                     sum(a.duration_ms for a in assets) <= 180000, "MEDIA_TOO_LONG", "单次回答累计最长 3 分钟"
+                 )
+diff --git a/app/modules/interview/transcription.py b/app/modules/interview/transcription.py
+new file mode 100644
+--- /dev/null
++++ b/app/modules/interview/transcription.py
+@@ -0,0 +1,260 @@
++"""Live captions and a short-lived, audio-bound transcript proof for answer submission."""
++
++import asyncio
++import base64
++import hashlib
++import io
++import json
++import time
++import wave
++from contextlib import suppress
++
++from fastapi import WebSocketDisconnect
++from sqlalchemy import func, select
++
++from app.core.errors import BusinessError, require
++from app.core.security import new_id, utcnow
++from app.db.models import AICallLog, Turn, User
++from app.modules.identity.service import IdentityService
++from app.modules.interview.service import InterviewService
++from app.providers import qwen_realtime
++
++
++def verified_transcript(rt, uid, turn_id, proof_id, asset):
++    if not proof_id:
++        return None
++    try:
++        encrypted = rt.cache.get(f"live-asr:{uid}:{turn_id}:{proof_id}")
++        if not encrypted:
++            return None
++        proof = json.loads(rt.security.decrypt(encrypted))
++        with wave.open(io.BytesIO(rt.storage.read(asset.object_key)), "rb") as audio:
++            if (audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) != (1, 2, 16000):
++                return None
++            digest = hashlib.sha256(audio.readframes(audio.getnframes())).hexdigest()
++        return proof["text"] if digest == proof["sha256"] else None
++    except (ValueError, KeyError, OSError, wave.Error):
++        return None
++
++
++async def transcribe_socket(ws, interview_id):
++    rt = ws.app.state.runtime
++    await ws.accept()
++    upstream = None
++    reader = None
++    uid, turn_id, language = None, None, None
++    started, pcm = time.monotonic(), bytearray()
++    completed, success = asyncio.Event(), False
++    pieces = {}
++    final_items = set()
++    failure = []
++    last_check = started
++    initial_cost, daily_cost = 0, 0
++
++    def authorize(token, requested_turn):
++        with rt.db.session() as db:
++            user, _ = IdentityService(rt, db).authenticate(token)
++            require(user.status == "ACTIVE", "AUTH_UNAUTHORIZED", "账号不可用", 401)
++            identity = IdentityService(rt, db, user.id)
++            identity.require_consents("PRIVACY", "TERMS", "AI_PROCESSING", "MICROPHONE")
++            svc = InterviewService(rt, db, user.id)
++            row = svc.get(interview_id)
++            turn = svc.current(row)
++            provisional = rt.cache.get(f"live-turn:{user.id}:{requested_turn}")
++            valid_provisional = (
++                provisional and json.loads(rt.security.decrypt(provisional)).get("interview_id") == row.id
++            )
++            require(
++                row.status == "IN_PROGRESS"
++                and turn
++                and ((turn.id == requested_turn and turn.status == "WAITING_ANSWER") or valid_provisional),
++                "INTERVIEW_INVALID_STATE",
++                "当前轮次不可采集字幕",
++                409,
++            )
++            used = db.scalar(
++                select(func.coalesce(func.sum(AICallLog.cost_microunits), 0)).where(
++                    AICallLog.interview_id == row.id
++                )
++            )
++            daily = db.scalar(
++                select(func.coalesce(func.sum(AICallLog.cost_microunits), 0)).where(
++                    AICallLog.created_at >= utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
++                )
++            )
++            require(
++                used < rt.settings.provider_cost_limit_microunits
++                and daily < rt.settings.global_daily_cost_limit_microunits,
++                "AI_COST_LIMIT",
++                "AI 成本预算已用完",
++                403,
++            )
++            return user.id, requested_turn, row.config_json["language"], used, daily
++
++    async def receive_provider():
++        try:
++            while True:
++                raw = await asyncio.to_thread(upstream.recv)
++                require(
++                    isinstance(raw, str) and len(raw) <= 200000, "AI_OUTPUT_INVALID", "实时转写响应无效", 502
++                )
++                event = json.loads(raw)
++                kind = event.get("type", "")
++                if kind == "session.updated":
++                    await ws.send_json({"type": "ready"})
++                elif kind in ("error", "conversation.item.input_audio_transcription.failed"):
++                    raise BusinessError("LIVE_ASR_UNAVAILABLE", "实时转写暂不可用，将使用回答后的转写", 503)
++                elif kind in (
++                    "conversation.item.input_audio_transcription.text",
++                    "conversation.item.input_audio_transcription.completed",
++                ):
++                    item = event.get("item_id", "current")
++                    text = (
++                        event.get("transcript", "")
++                        if kind.endswith("completed")
++                        else event.get("text", "") + event.get("stash", "")
++                    )
++                    require(
++                        isinstance(text, str) and len(text) <= 20000, "AI_OUTPUT_INVALID", "字幕长度无效", 502
++                    )
++                    pieces[item] = text
++                    if kind.endswith("completed"):
++                        final_items.add(item)
++                    combined = "".join(pieces.values())
++                    require(len(combined) <= 20000, "AI_OUTPUT_INVALID", "字幕超过限制", 502)
++                    await ws.send_json(
++                        {"type": "caption", "text": combined, "final": len(final_items) == len(pieces)}
++                    )
++                elif kind == "session.finished":
++                    completed.set()
++                    return
++        except Exception:
++            failure.append(True)
++            completed.set()
++
++    try:
++        require(bool(qwen_realtime.endpoint(rt.settings)), "LIVE_ASR_UNAVAILABLE", "服务未配置实时转写", 503)
++        first = await asyncio.wait_for(ws.receive_json(), timeout=5)
++        token = first.get("token", "")
++        requested_turn = first.get("turn_id", "")
++        require(
++            isinstance(token, str) and len(token) <= 8192 and isinstance(requested_turn, str),
++            "AUTH_UNAUTHORIZED",
++            "实时字幕认证无效",
++            401,
++        )
++        uid, turn_id, language, initial_cost, daily_cost = await asyncio.to_thread(
++            authorize, token, requested_turn
++        )
++        require(rt.cache.hit(f"live-asr-open:{uid}", 20), "RATE_LIMITED", "实时转写请求过于频繁", 429)
++        require(
++            not rt.cache.get("provider:cooldown") and rt.cache.hit("provider:requests:minute", 1000),
++            "AI_CIRCUIT_OPEN",
++            "语音服务繁忙，稍后将自动补全字幕",
++            503,
++        )
++        upstream = await asyncio.to_thread(qwen_realtime.connect, rt.settings, language)
++        reader = asyncio.create_task(receive_provider())
++        while True:
++            message = await asyncio.wait_for(ws.receive(), timeout=30)
++            if message["type"] == "websocket.disconnect":
++                raise WebSocketDisconnect()
++            data = message.get("bytes")
++            if data is not None:
++                require(
++                    0 < len(data) <= 32768 and len(data) % 2 == 0, "MEDIA_INVALID_FORMAT", "实时音频格式无效"
++                )
++                pcm.extend(data)
++                require(len(pcm) <= 180 * 32000, "MEDIA_TOO_LONG", "单轮回答最长 3 分钟")
++                estimated = round(len(pcm) / 32000 / 60 * rt.settings.asr_cost_per_minute)
++                require(
++                    initial_cost + estimated < rt.settings.provider_cost_limit_microunits
++                    and daily_cost + estimated < rt.settings.global_daily_cost_limit_microunits,
++                    "AI_COST_LIMIT",
++                    "AI 成本预算已用完",
++                    403,
++                )
++                if time.monotonic() - last_check >= 5:
++                    await asyncio.to_thread(authorize, token, requested_turn)
++                    last_check = time.monotonic()
++                await asyncio.to_thread(
++                    upstream.send,
++                    json.dumps(
++                        {
++                            "type": "input_audio_buffer.append",
++                            "event_id": new_id(),
++                            "audio": base64.b64encode(data).decode(),
++                        }
++                    ),
++                )
++            elif json.loads(message.get("text") or "{}").get("type") == "finish":
++                await asyncio.to_thread(
++                    upstream.send, json.dumps({"type": "session.finish", "event_id": new_id()})
++                )
++                await asyncio.wait_for(completed.wait(), timeout=10)
++                require(not failure, "LIVE_ASR_UNAVAILABLE", "实时字幕连接中断，将使用回答后的转写", 503)
++                await asyncio.to_thread(authorize, token, requested_turn)
++                text = "".join(pieces.values())
++                require(
++                    text.strip() and len(final_items) == len(pieces),
++                    "LIVE_ASR_UNAVAILABLE",
++                    "实时转写尚未完成",
++                    503,
++                )
++                proof_id = new_id()
++                rt.cache.put(
++                    f"live-asr:{uid}:{turn_id}:{proof_id}",
++                    rt.security.encrypt(
++                        json.dumps(
++                            {"text": text, "sha256": hashlib.sha256(pcm).hexdigest()}, ensure_ascii=False
++                        )
++                    ),
++                    600,
++                )
++                await ws.send_json({"type": "complete", "text": text, "transcript_id": proof_id})
++                success = True
++                break
++    except WebSocketDisconnect:
++        pass
++    except Exception as exc:
++        with suppress(RuntimeError, WebSocketDisconnect):
++            await ws.send_json(
++                {
++                    "type": "error",
++                    "code": exc.code if isinstance(exc, BusinessError) else "LIVE_ASR_UNAVAILABLE",
++                    "message": "实时字幕暂不可用，录制继续，回答后将自动补全字幕。",
++                }
++            )
++    finally:
++        if upstream:
++            await asyncio.to_thread(upstream.close)
++        if reader:
++            reader.cancel()
++            with suppress(asyncio.CancelledError):
++                await reader
++        if uid:
++            with rt.db.session() as db:
++                if db.get(User, uid):
++                    duration = round(len(pcm) / 32)
++                    db.add(
++                        AICallLog(
++                            user_id=uid,
++                            interview_id=interview_id,
++                            turn_id=turn_id if db.get(Turn, turn_id) else None,
++                            provider="compatible",
++                            model=rt.settings.realtime_asr_model,
++                            call_type="asr",
++                            latency_ms=round((time.monotonic() - started) * 1000),
++                            status="SUCCEEDED" if success else "FAILED",
++                            input_tokens=0,
++                            output_tokens=0,
++                            cost_microunits=round(duration * rt.settings.asr_cost_per_minute / 60000),
++                            units={
++                                "asr_duration_ms": duration,
++                                "asr_provider": "qwen-realtime",
++                                "cost_source": "configured_rate",
++                            },
++                        )
++                    )
++        with suppress(RuntimeError, WebSocketDisconnect):
++            await ws.close()
+diff --git a/app/modules/media/service.py b/app/modules/media/service.py
+--- a/app/modules/media/service.py
++++ b/app/modules/media/service.py
+@@ -36,6 +36,7 @@
+ 
+ MIMES["SESSION_AUDIO"] = MIMES["AUDIO"]
+ MIMES["SESSION_VIDEO"] = MIMES["VIDEO"]
++MIMES["SESSION_CAPTIONS"] = {"text/vtt": {".vtt"}}
+ 
+ 
+ def aware(value):
+@@ -43,6 +44,13 @@
+ 
+ 
+ def inspect_media(data, mime, kind, *, ffprobe_bin="ffprobe"):
++    if kind == "SESSION_CAPTIONS":
++        try:
++            valid = len(data) <= 1024 * 1024 and data.decode("utf-8").startswith("WEBVTT\n")
++        except UnicodeDecodeError:
++            valid = False
++        require(valid, "MEDIA_INVALID_FORMAT", "字幕必须为 UTF-8 WebVTT 文件", 415)
++        return None
+     if mime == "application/pdf":
+         valid = data.startswith(b"%PDF-")
+     elif "wordprocessingml" in mime:
+@@ -134,7 +142,7 @@
+     def upload(self, data, resume=False):
+         kind = "RESUME" if resume else data.media_type
+         IdentityService(self.rt, self.db, self.uid).require_consents("PRIVACY", "TERMS")
+-        session_recording = kind in ("SESSION_AUDIO", "SESSION_VIDEO")
++        session_recording = kind in ("SESSION_AUDIO", "SESSION_VIDEO", "SESSION_CAPTIONS")
+         if session_recording:
+             IdentityService(self.rt, self.db, self.uid).require_consents(
+                 "MICROPHONE", *(["CAMERA", "SCREEN_CAPTURE"] if kind == "SESSION_VIDEO" else [])
+@@ -189,6 +197,8 @@
+             else self.rt.settings.max_upload_bytes
+         )
+         require(data.size <= maximum, "MEDIA_TOO_LARGE", "文件超过限制", 413)
++        if kind == "SESSION_CAPTIONS":
++            require(data.size <= 1024 * 1024, "MEDIA_TOO_LARGE", "字幕文件最大 1 MB", 413)
+         if kind in ("AUDIO", "VIDEO"):
+             require(
+                 data.duration_ms and data.duration_ms <= (120000 if kind == "VIDEO" else 180000),
+@@ -202,7 +212,7 @@
+             id=asset_id,
+             user_id=self.uid,
+             interview_id=data.interview_id
+-            if kind in ("AUDIO", "VIDEO", "SESSION_AUDIO", "SESSION_VIDEO")
++            if kind in ("AUDIO", "VIDEO", "SESSION_AUDIO", "SESSION_VIDEO", "SESSION_CAPTIONS")
+             else None,
+             turn_id=data.turn_id if kind in ("AUDIO", "VIDEO") else None,
+             media_type=kind,
+diff --git a/app/providers/compatible.py b/app/providers/compatible.py
+--- a/app/providers/compatible.py
++++ b/app/providers/compatible.py
+@@ -12,6 +12,7 @@
+ from app.core.errors import BusinessError, require
+ from app.providers.ai import SYSTEM_PROMPT
+ from app.providers.dashscope_tts import DashScopeTTS
++from app.providers.live import live_sink
+ from app.providers.qwen_asr import QwenASR
+ from app.providers.report_evidence import prepare_report_evidence, resolve_report_evidence
+ 
+@@ -238,6 +239,11 @@
+                 ],
+                 "response_format": fmt,
+             }
++            if operation == "decision" and live_sink.get():
++                body["messages"][0]["content"] += (
++                    "\n这是实时语音面试。追问只用一个简短问句（60字内）；reason控制在30字内，"
++                    "answer_summary控制在80字内。直接输出完整JSON，避免长篇分析或复述回答。"
++                )
+             if s.provider_model == "qwen3.8-omni-flash":
+                 body.update(
+                     modalities=["text"],
+diff --git a/app/providers/dashscope_tts.py b/app/providers/dashscope_tts.py
+--- a/app/providers/dashscope_tts.py
++++ b/app/providers/dashscope_tts.py
+@@ -1,16 +1,19 @@
+ """DashScope WebSocket speech synthesis, adapted to the application's TTS contract."""
+ 
+ import base64
+-from threading import Lock
++import io
++import wave
++from threading import Event, Lock
+ from typing import Literal
+ 
+ import dashscope
+-from dashscope.audio.tts_v2 import AudioFormat, SpeechSynthesizer
++from dashscope.audio.tts_v2 import AudioFormat, ResultCallback, SpeechSynthesizer
+ from dashscope.common.error import DashScopeException, RequestFailure
+ from pydantic import BaseModel, Field, ValidationError
+ from websocket import WebSocketException
+ 
+ from app.core.errors import BusinessError, require
++from app.providers.live import audio_turn, live_sink
+ 
+ _sdk_lock = Lock()
+ 
+@@ -40,6 +43,34 @@
+     def synthesize(self, text):
+         s = self.settings
+         synthesizer = None
++        sink, turn_id = live_sink.get(), audio_turn.get()
++        done, chunks, failures = Event(), [], []
++
++        class Callback(ResultCallback):
++            def on_data(self, data):
++                if sum(map(len, chunks)) + len(data) > 10 * 1024 * 1024:
++                    failures.append("too_large")
++                    done.set()
++                    return
++                chunks.append(data)
++                sink(
++                    {
++                        "type": "audio",
++                        "turn_id": turn_id,
++                        "sample_rate": 24000,
++                        "pcm": base64.b64encode(data).decode(),
++                    }
++                )
++
++            def on_complete(self):
++                done.set()
++
++            def on_error(self, message):
++                failures.append("provider_error")
++                done.set()
++
++        if sink:
++            sink({"type": "audio_reset", "turn_id": turn_id})
+         try:
+             # The v1 SDK copies the process API key during construction. Serialize
+             # that short step and restore it before starting any network request.
+@@ -51,11 +82,25 @@
+                         model=s.tts_model,
+                         voice=s.tts_voice,
+                         url=s.dashscope_websocket_url,
+-                        format=AudioFormat.MP3_22050HZ_MONO_256KBPS,
++                        format=AudioFormat.PCM_24000HZ_MONO_16BIT
++                        if sink
++                        else AudioFormat.MP3_22050HZ_MONO_256KBPS,
++                        **({"callback": Callback()} if sink else {}),
+                     )
+                 finally:
+                     dashscope.api_key = previous_key
+             audio = synthesizer.call(text, timeout_millis=max(1, int(s.provider_timeout_seconds * 1000)))
++            if sink:
++                if not done.wait(s.provider_timeout_seconds):
++                    raise TimeoutError("streaming synthesis timed out")
++                require(not failures, "AI_PROVIDER_BUSY", "流式语音合成中断", 503)
++                output = io.BytesIO()
++                with wave.open(output, "wb") as wav:
++                    wav.setnchannels(1)
++                    wav.setsampwidth(2)
++                    wav.setframerate(24000)
++                    wav.writeframes(b"".join(chunks))
++                audio = output.getvalue()
+             response = synthesizer.get_response() or {}
+         except RequestFailure as exc:
+             transient = any(
+@@ -88,7 +133,10 @@
+             raise BusinessError("AI_OUTPUT_INVALID", "语音合成任务状态或用量字段无效", 502) from exc
+         input_tokens, output_tokens = usage.input_tokens, usage.output_tokens
+         return {
+-            "data": {"audio_base64": base64.b64encode(audio).decode(), "mime_type": "audio/mpeg"},
++            "data": {
++                "audio_base64": base64.b64encode(audio).decode(),
++                "mime_type": "audio/wav" if sink else "audio/mpeg",
++            },
+             "usage": {
+                 "input_tokens": input_tokens,
+                 "output_tokens": output_tokens,
+diff --git a/app/providers/live.py b/app/providers/live.py
+new file mode 100644
+--- /dev/null
++++ b/app/providers/live.py
+@@ -0,0 +1,12 @@
++"""Request-local progress hooks; providers never depend on HTTP or business services."""
++
++from contextvars import ContextVar
++
++live_sink = ContextVar("live_answer_sink", default=None)
++audio_turn = ContextVar("live_audio_turn", default=None)
++
++
++def publish(kind, **payload):
++    sink = live_sink.get()
++    if sink:
++        sink({"type": kind, **payload})
+diff --git a/app/providers/qwen_realtime.py b/app/providers/qwen_realtime.py
+new file mode 100644
+--- /dev/null
++++ b/app/providers/qwen_realtime.py
+@@ -0,0 +1,49 @@
++"""Qwen-ASR-Realtime transport. Only this server receives the provider API key."""
++
++import json
++from urllib.parse import urlencode, urlsplit, urlunsplit
++
++from websocket import create_connection
++
++
++def endpoint(settings):
++    if (
++        not settings.realtime_asr_enabled
++        or settings.provider_mode != "compatible"
++        or settings.asr_provider != "qwen"
++    ):
++        return ""
++    if settings.realtime_asr_url:
++        return settings.realtime_asr_url
++    parsed = urlsplit(settings.dashscope_websocket_url)
++    if parsed.scheme == "wss" and parsed.hostname:
++        return urlunsplit(("wss", parsed.netloc, "/api-ws/v1/realtime", "", ""))
++    parsed = urlsplit(settings.provider_url)
++    if parsed.scheme == "https" and parsed.hostname and "dashscope" in parsed.hostname:
++        return urlunsplit(("wss", parsed.netloc, "/api-ws/v1/realtime", "", ""))
++    return ""
++
++
++def connect(settings, language):
++    url = endpoint(settings)
++    ws = create_connection(
++        url + ("&" if "?" in url else "?") + urlencode({"model": settings.realtime_asr_model}),
++        header={"Authorization": f"Bearer {settings.provider_api_key}"},
++        timeout=10,
++        enable_multithread=True,
++    )
++    ws.send(
++        json.dumps(
++            {
++                "type": "session.update",
++                "event_id": "configure",
++                "session": {
++                    "input_audio_format": "pcm",
++                    "sample_rate": 16000,
++                    "input_audio_transcription": {"language": language.split("-")[0]},
++                    "turn_detection": {"type": "server_vad", "threshold": 0.0, "silence_duration_ms": 400},
++                },
++            }
++        )
++    )
++    return ws
+diff --git a/app/schemas/contracts.py b/app/schemas/contracts.py
+--- a/app/schemas/contracts.py
++++ b/app/schemas/contracts.py
+@@ -31,7 +31,9 @@
+ 
+ 
+ class ConsentInput(DTO):
+-    consent_type: Literal["PRIVACY", "TERMS", "AI_PROCESSING", "MICROPHONE", "CAMERA", "SCREEN_CAPTURE", "SUPPORT_REVIEW"]
++    consent_type: Literal[
++        "PRIVACY", "TERMS", "AI_PROCESSING", "MICROPHONE", "CAMERA", "SCREEN_CAPTURE", "SUPPORT_REVIEW"
++    ]
+     policy_version: Text = Field(max_length=30)
+ 
+ 
+@@ -63,7 +65,9 @@
+     filename: Text = Field(max_length=200)
+     content_type: Text = Field(max_length=120)
+     size: int = Field(ge=1, le=512 * 1024 * 1024)
+-    media_type: Literal["AUDIO", "VIDEO", "RESUME", "JD_IMAGE", "SESSION_AUDIO", "SESSION_VIDEO"] = "AUDIO"
++    media_type: Literal[
++        "AUDIO", "VIDEO", "RESUME", "JD_IMAGE", "SESSION_AUDIO", "SESSION_VIDEO", "SESSION_CAPTIONS"
++    ] = "AUDIO"
+     interview_id: Optional[str] = None
+     turn_id: Optional[str] = None
+     duration_ms: Optional[int] = Field(None, ge=1, le=7200000)
+@@ -79,6 +83,7 @@
+     asset_id: Optional[str] = None
+     asset_ids: Optional[list[str]] = Field(None, min_length=1, max_length=3)
+     client_duration_ms: Optional[int] = Field(None, ge=1, le=180000)
++    live_transcript_id: Optional[str] = Field(None, max_length=36)
+ 
+     @model_validator(mode="after")
+     def one_source(self):
+@@ -185,4 +190,4 @@
+ 
+ class SynthesizedAudio(DTO):
+     audio_base64: str = Field(max_length=14 * 1024 * 1024)
+-    mime_type: Literal["audio/mpeg"]
++    mime_type: Literal["audio/mpeg", "audio/wav"]
+diff --git a/docs/live-conversation.md b/docs/live-conversation.md
+new file mode 100644
+--- /dev/null
++++ b/docs/live-conversation.md
+@@ -0,0 +1,19 @@
++# 连续面试的低延迟对话与字幕
++
++`POST /api/v1/interviews/{id}/turns/{turn_id}/submit-stream` 接收与普通提交相同的 Answer 和 Idempotency-Key，先提交持久化任务，再立即执行。短租约防止普通 Outbox 抢先调度；API 异常退出后由既有 Worker 恢复。SSE 依次推送 accepted、transcribing、transcript、thinking、question、audio_reset、audio、audio_end、complete/deferred；音频为 24 kHz 单声道有符号 16 位小端 PCM 的 Base64。客户端无需等待 1.5 秒轮询或整句 TTS 合成完毕。断开连接不取消持久化回答任务；音频和提问在生成完成后正常保存为题目媒体资产，便于重放。
++
++`WS /api/v1/interviews/{id}/live-transcription` 在首条 JSON 消息内接收 token 与 turn_id，不把凭据放进 URL。后续二进制消息为 16 kHz 单声道 16 位小端 PCM，单块最多 32 KB、单轮最多 3 分钟；`{"type":"finish"}` 结束本次采集。服务端核验身份、面试归属、当前轮次和麦克风/AI 授权，限制频率与费用预算，并定期重新核验授权。浏览器只收到 ready/caption/complete/error，不会收到供应商密钥，也不使用供应商情绪标签。转写完成后短期缓存加密的文本与 PCM SHA-256，返回 live_transcript_id。
++
++提交回答时可附 live_transcript_id。服务端只有在用户、轮次、有效期及上传 WAV 的 PCM 哈希完全匹配时，才复用实时转写；不匹配或过期会使用原有 ASR。业务事实仍保存在数据库，缓存不决定题目状态或评分。追问未完全持久化期间可使用短期受限的下一轮信息开始字幕；提交答案仍须等对应轮次落库，异常回滚时不会把回答误绑到其他题。
++
++DashScope TTS 在流式请求内输出 PCM，普通任务仍使用原来的完整 MP3 协议。流式音频同时收集为 WAV 保存，所有用量和失败通过既有 AI 日志记录。模型输出仍通过 Decision/SynthesizedAudio 校验；实时追问提示使用简短问句及摘要，报告仍使用原始回答证据。
++
++`SESSION_CAPTIONS` 是整场字幕资产，类型为 text/vtt、扩展名 .vtt、UTF-8 WEBVTT 文件头，最大 1 MB。它与整场音视频一样按 owner 和 interview 鉴权，不关联单题。接口、资产和缓存增加均不涉及数据库结构变更。
++
++配置：REALTIME_ASR_ENABLED（默认 true）、REALTIME_ASR_MODEL（默认 qwen3-asr-flash-realtime）、REALTIME_ASR_URL（WSS，可从现有 DashScope 地址推导）。仅在 compatible Provider + qwen ASR 下启用实时转写；其他配置保留回答后转写。部署需重载服务，网关须支持 WebSocket、SSE 并关闭代理缓冲。
++
++延迟由静音检测、上传、模型推理、首包语音和网络共同决定，不承诺零毫秒。Qwen 实时 ASR 不提供逐字时间戳；当前字幕使用客户端记录的句段时间，候选人识别中的文本可能被后续结果修正。
++
++验证：`pytest tests/test_live_conversation.py` 覆盖流式事件先后、重复提交、资源归属、实时字幕、匹配音频复用 ASR、错误音频回退和字幕文件上传；完整 pytest 与 Ruff 均须通过。
++
++供应商协议参考：[实时 ASR 客户端事件](https://help.aliyun.com/en/model-studio/qwen-asr-realtime-client-events)、[实时 ASR 服务端事件](https://help.aliyun.com/en/model-studio/qwen-asr-realtime-server-events)。
+diff --git a/tests/test_live_conversation.py b/tests/test_live_conversation.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_live_conversation.py
+@@ -0,0 +1,218 @@
++import base64
++import io
++import json
++import queue
++import time
++import wave
++
++from app.modules.media.service import MediaService
++from app.providers.ai import MockProvider
++from app.providers.live import audio_turn, live_sink
++from app.schemas.contracts import UploadComplete, UploadInput
++from tests.conftest import data, interview, login
++
++
++def wav(pcm, rate=16000):
++    output = io.BytesIO()
++    with wave.open(output, "wb") as audio:
++        audio.setnchannels(1)
++        audio.setsampwidth(2)
++        audio.setframerate(rate)
++        audio.writeframes(pcm)
++    return output.getvalue()
++
++
++class StreamingProvider(MockProvider):
++    asr_calls = 0
++
++    def invoke(self, operation, payload, schema):
++        if operation == "asr":
++            self.asr_calls += 1
++        if operation == "tts" and live_sink.get():
++            pcm = b"\x01\x00" * 2400
++            live_sink.get()({"type": "audio_reset", "turn_id": audio_turn.get()})
++            live_sink.get()(
++                {
++                    "type": "audio",
++                    "turn_id": audio_turn.get(),
++                    "sample_rate": 24000,
++                    "pcm": base64.b64encode(pcm).decode(),
++                }
++            )
++            time.sleep(0.02)
++            return {
++                "data": {"audio_base64": base64.b64encode(wav(pcm, 24000)).decode(), "mime_type": "audio/wav"}
++            }
++        return super().invoke(operation, payload, schema)
++
++
++def setup(client):
++    headers, uid = login(client)
++    row = interview(client, headers, config={"mode": "VOICE", "question_count": 2, "allow_follow_up": True})
++    data(client.post(f"/api/v1/interviews/{row['id']}/start", headers=headers))
++    provider = StreamingProvider()
++    client.app.state.runtime.provider = provider
++    return headers, uid, row, provider
++
++
++def events(response):
++    assert response.is_success, response.text
++    return [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
++
++
++def test_stream_pushes_transcript_and_pcm_before_committed_state_and_is_idempotent(client):
++    headers, uid, row, _ = setup(client)
++    path = f"/api/v1/interviews/{row['id']}/turns/{row['current_question']['id']}/submit-stream"
++    request_headers = {**headers, "Idempotency-Key": "live-answer"}
++    output = events(
++        client.post(path, headers=request_headers, json={"text": "我负责 React 组件开发和性能优化。"})
++    )
++    kinds = [event["type"] for event in output]
++    assert (
++        kinds.index("transcript") < kinds.index("question") < kinds.index("audio") < kinds.index("complete")
++    )
++    assert output[-1]["interview"]["current_question"]["question_audio"]["content_type"] == "audio/wav"
++    again = events(
++        client.post(path, headers=request_headers, json={"text": "我负责 React 组件开发和性能优化。"})
++    )
++    assert again[-1]["type"] == "complete"
++    assert len(data(client.get(f"/api/v1/interviews/{row['id']}/turns", headers=headers))["items"]) == 2
++    other, _ = login(client, "other-live-owner")
++    assert (
++        client.post(path, headers={**other, "Idempotency-Key": "wrong"}, json={"text": "回答"}).status_code
++        == 404
++    )
++
++
++class FakeASRSocket:
++    def __init__(self):
++        self.items = queue.Queue()
++        self.items.put(json.dumps({"type": "session.updated"}))
++
++    def recv(self):
++        return self.items.get(timeout=3)
++
++    def send(self, message):
++        event = json.loads(message)
++        if event["type"] == "input_audio_buffer.append":
++            self.items.put(
++                json.dumps(
++                    {
++                        "type": "conversation.item.input_audio_transcription.text",
++                        "item_id": "speech",
++                        "text": "我负责",
++                        "stash": "组件开发",
++                    }
++                )
++            )
++        elif event["type"] == "session.finish":
++            self.items.put(
++                json.dumps(
++                    {
++                        "type": "conversation.item.input_audio_transcription.completed",
++                        "item_id": "speech",
++                        "transcript": "我负责组件开发。",
++                    }
++                )
++            )
++            self.items.put(json.dumps({"type": "session.finished"}))
++
++    def close(self):
++        self.items.put(json.dumps({"type": "session.finished"}))
++
++
++def live_proof(client, monkeypatch, headers, row, pcm):
++    from app.providers import qwen_realtime
++
++    settings = client.app.state.runtime.settings
++    settings.provider_mode, settings.asr_provider = "compatible", "qwen"
++    settings.realtime_asr_url = "wss://test.invalid/realtime"
++    monkeypatch.setattr(qwen_realtime, "connect", lambda *_: FakeASRSocket())
++    with client.websocket_connect(f"/api/v1/interviews/{row['id']}/live-transcription") as ws:
++        ws.send_json({"token": headers["Authorization"][7:], "turn_id": row["current_question"]["id"]})
++        assert ws.receive_json()["type"] == "ready"
++        ws.send_bytes(pcm)
++        partial = ws.receive_json()
++        assert partial["text"] == "我负责组件开发"
++        ws.send_json({"type": "finish"})
++        assert ws.receive_json()["type"] == "caption"
++        result = ws.receive_json()
++        assert result["type"] == "complete"
++        return result["transcript_id"]
++
++
++def upload_audio(client, uid, row, pcm):
++    rt = client.app.state.runtime
++    audio = wav(pcm)
++    with rt.db.session() as db:
++        svc = MediaService(rt, db, uid)
++        ticket = svc.upload(
++            UploadInput(
++                filename="answer.wav",
++                content_type="audio/wav",
++                media_type="AUDIO",
++                size=len(audio),
++                duration_ms=len(pcm) // 32,
++                interview_id=row["id"],
++                turn_id=row["current_question"]["id"],
++            )
++        )
++        from app.db.models import MediaAsset
++
++        asset = db.get(MediaAsset, ticket["asset_id"])
++        rt.storage.put(asset.object_key, audio, "audio/wav")
++        svc.complete(asset.id, UploadComplete())
++        return asset.id
++
++
++def test_verified_live_transcript_skips_second_asr_and_captions_are_live(client, monkeypatch):
++    headers, uid, row, provider = setup(client)
++    pcm = b"\x01\x00" * 16000
++    proof = live_proof(client, monkeypatch, headers, row, pcm)
++    asset = upload_audio(client, uid, row, pcm)
++    output = events(
++        client.post(
++            f"/api/v1/interviews/{row['id']}/turns/{row['current_question']['id']}/submit-stream",
++            headers={**headers, "Idempotency-Key": "live-proof"},
++            json={"asset_id": asset, "client_duration_ms": 1000, "live_transcript_id": proof},
++        )
++    )
++    assert next(event for event in output if event["type"] == "transcript")["text"] == "我负责组件开发。"
++    assert provider.asr_calls == 0
++
++
++def test_live_transcript_proof_cannot_be_reused_for_different_audio(client, monkeypatch):
++    headers, uid, row, provider = setup(client)
++    proof = live_proof(client, monkeypatch, headers, row, b"\x01\x00" * 16000)
++    asset = upload_audio(client, uid, row, b"\x02\x00" * 16000)
++    events(
++        client.post(
++            f"/api/v1/interviews/{row['id']}/turns/{row['current_question']['id']}/submit-stream",
++            headers={**headers, "Idempotency-Key": "wrong-proof"},
++            json={"asset_id": asset, "client_duration_ms": 1000, "live_transcript_id": proof},
++        )
++    )
++    assert provider.asr_calls == 1
++
++
++def test_webvtt_is_validated_and_owned(client):
++    headers, uid, row, _ = setup(client)
++    rt = client.app.state.runtime
++    content = b"WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nTest caption\n"
++    with rt.db.session() as db:
++        svc = MediaService(rt, db, uid)
++        ticket = svc.upload(
++            UploadInput(
++                filename="captions.vtt",
++                content_type="text/vtt",
++                media_type="SESSION_CAPTIONS",
++                size=len(content),
++                duration_ms=1000,
++                interview_id=row["id"],
++            )
++        )
++        from app.db.models import MediaAsset
++
++        asset = db.get(MediaAsset, ticket["asset_id"])
++        rt.storage.put(asset.object_key, content, "text/vtt")
++        assert svc.complete(asset.id, UploadComplete())["status"] == "READY"

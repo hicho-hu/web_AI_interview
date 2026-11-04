@@ -1,0 +1,108 @@
+--- a/app/schemas/contracts.py
++++ b/app/schemas/contracts.py
+@@ -31,7 +31,7 @@
+ 
+ 
+ class ConsentInput(DTO):
+-    consent_type: Literal["PRIVACY", "TERMS", "AI_PROCESSING", "MICROPHONE", "CAMERA"]
++    consent_type: Literal["PRIVACY", "TERMS", "AI_PROCESSING", "MICROPHONE", "CAMERA", "SCREEN_CAPTURE"]
+     policy_version: Text = Field(max_length=30)
+ 
+ 
+@@ -62,11 +62,11 @@
+ class UploadInput(DTO):
+     filename: Text = Field(max_length=200)
+     content_type: Text = Field(max_length=120)
+-    size: int = Field(ge=1, le=32 * 1024 * 1024)
+-    media_type: Literal["AUDIO", "VIDEO", "RESUME", "JD_IMAGE"] = "AUDIO"
++    size: int = Field(ge=1, le=512 * 1024 * 1024)
++    media_type: Literal["AUDIO", "VIDEO", "RESUME", "JD_IMAGE", "SESSION_AUDIO", "SESSION_VIDEO"] = "AUDIO"
+     interview_id: Optional[str] = None
+     turn_id: Optional[str] = None
+-    duration_ms: Optional[int] = Field(None, ge=1, le=180000)
++    duration_ms: Optional[int] = Field(None, ge=1, le=7200000)
+ 
+ 
+ class UploadComplete(DTO):
+--- a/app/modules/media/service.py
++++ b/app/modules/media/service.py
+@@ -32,6 +32,10 @@
+     "VIDEO": {"video/mp4": {".mp4"}, "video/webm": {".webm"}},
+     "JD_IMAGE": {"image/png": {".png"}, "image/jpeg": {".jpg", ".jpeg"}},
+ }
++
++
++MIMES["SESSION_AUDIO"] = MIMES["AUDIO"]
++MIMES["SESSION_VIDEO"] = MIMES["VIDEO"]
+ 
+ 
+ def aware(value):
+@@ -58,7 +62,7 @@
+     else:
+         valid = data.startswith(b"\xff\xd8\xff")
+     require(valid, "MEDIA_INVALID_FORMAT", "文件头与声明类型不符", 415)
+-    if kind not in ("AUDIO", "VIDEO"):
++    if kind not in ("AUDIO", "VIDEO", "SESSION_AUDIO", "SESSION_VIDEO"):
+         return None
+     if mime in ("audio/wav", "audio/x-wav"):
+         try:
+@@ -104,7 +108,7 @@
+         require(
+             any(s["codec_type"] == "audio" for s in streams), "MEDIA_INVALID_FORMAT", "媒体必须包含音轨", 415
+         )
+-        if kind == "VIDEO":
++        if kind in ("VIDEO", "SESSION_VIDEO"):
+             video = next((s for s in streams if s["codec_type"] == "video"), None)
+             require(
+                 video and video.get("height", 0) <= 720 and video.get("width", 0) <= 1280,
+@@ -130,6 +134,18 @@
+     def upload(self, data, resume=False):
+         kind = "RESUME" if resume else data.media_type
+         IdentityService(self.rt, self.db, self.uid).require_consents("PRIVACY", "TERMS")
++        session_recording = kind in ("SESSION_AUDIO", "SESSION_VIDEO")
++        if session_recording:
++            IdentityService(self.rt, self.db, self.uid).require_consents(
++                "MICROPHONE", *(["CAMERA", "SCREEN_CAPTURE"] if kind == "SESSION_VIDEO" else [])
++            )
++            require(data.interview_id and data.duration_ms, "MEDIA_INTERVIEW_REQUIRED", "整场录制必须关联面试和时长")
++            interview = owned(self.db, Interview, data.interview_id, self.uid)
++            require(not interview.deleted_at and interview.status in (
++                "IN_PROGRESS", "PAUSED", "FINISHING", "COMPLETED", "REPORT_FAILED", "CANCELLED"
++            ), "INTERVIEW_INVALID_STATE", "当前面试不允许保存整场录制", 409)
++            require(data.turn_id is None, "MEDIA_SESSION_SCOPE", "整场录制不能关联单题轮次")
++            require(data.duration_ms <= 7200000, "MEDIA_TOO_LONG", "整场录制最长 2 小时")
+         if kind in ("AUDIO", "VIDEO"):
+             IdentityService(self.rt, self.db, self.uid).require_consents(
+                 "MICROPHONE", *(["CAMERA"] if kind == "VIDEO" else [])
+@@ -156,15 +172,19 @@
+         require(
+             ext in MIMES[kind].get(data.content_type, set()), "MEDIA_INVALID_FORMAT", "不支持的文件格式", 415
+         )
+-        maximum = 10 * 1024 * 1024 if kind in ("RESUME", "JD_IMAGE") else self.rt.settings.max_upload_bytes
++        maximum = (512 * 1024 * 1024 if session_recording else
++                   10 * 1024 * 1024 if kind in ("RESUME", "JD_IMAGE") else self.rt.settings.max_upload_bytes)
+         require(data.size <= maximum, "MEDIA_TOO_LARGE", "文件超过限制", 413)
++        if kind in ("AUDIO", "VIDEO"):
++            require(data.duration_ms and data.duration_ms <= (120000 if kind == "VIDEO" else 180000),
++                    "MEDIA_TOO_LONG", "单题录音最长 3 分钟，录像最长 2 分钟")
+         if kind == "VIDEO":
+             require(data.duration_ms <= 120000, "MEDIA_TOO_LONG", "视频单段最长 2 分钟")
+         asset_id = new_id()
+         row = MediaAsset(
+             id=asset_id,
+             user_id=self.uid,
+-            interview_id=data.interview_id if kind in ("AUDIO", "VIDEO") else None,
++            interview_id=data.interview_id if kind in ("AUDIO", "VIDEO", "SESSION_AUDIO", "SESSION_VIDEO") else None,
+             turn_id=data.turn_id if kind in ("AUDIO", "VIDEO") else None,
+             media_type=kind,
+             filename=data.filename,
+@@ -216,7 +236,8 @@
+         )
+         if duration is not None:
+             require(
+-                0 < duration <= (120000 if row.media_type == "VIDEO" else 180000),
++                0 < duration <= (7200000 if row.media_type in ("SESSION_AUDIO", "SESSION_VIDEO")
++                                 else 120000 if row.media_type == "VIDEO" else 180000),
+                 "MEDIA_TOO_LONG",
+                 "媒体实际时长超出范围",
+             )

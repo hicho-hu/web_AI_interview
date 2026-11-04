@@ -1,0 +1,33 @@
+--- a/app/modules/report/service.py
++++ b/app/modules/report/service.py
+@@ -64,14 +64,10 @@
+                     )
+             scores = [d["score"] for d in data["dimensions"] if d["score"] is not None]
+             expected = round(sum(scores) / len(scores), 1) if scores else None
+-            require(
+-                data["overall_score"] is None
+-                if expected is None
+-                else data["overall_score"] is not None and abs(data["overall_score"] - expected) <= 1,
+-                "AI_OUTPUT_INVALID",
+-                "综合得分须为有效维度的平均分",
+-                502,
+-            )
++            # Arithmetic is deterministic; derive the total from validated dimensions
++            # rather than rejecting otherwise valid feedback for a model math error.
++            data["overall_score"] = expected
++
+ 
+         segments, current, size = [], [], 0
+         for turn in usable:
+--- a/tests/test_report_processing.py
++++ b/tests/test_report_processing.py
+@@ -90,8 +90,7 @@
+                             feedback="已说明具体行动，但量化结果与技术权衡仍需补充。",
+                             evidence=[payload["turns"][0]["answer"]],
+                         )
+-                assessed = [score for score in scores if score is not None]
+-                report["overall_score"] = round(sum(assessed) / len(assessed), 1)
++                report["overall_score"] = 0  # Model arithmetic must not discard supported dimension scores.
+             return result
+ 
+     client.app.state.runtime.provider = ScoredReport()

@@ -1,0 +1,1270 @@
+--- a/app/api/admin.py
++++ b/app/api/admin.py
+@@ -27,6 +27,7 @@
+     QUALITY_FIELDS,
+     AdminService,
+ )
++from app.modules.billing.service import BillingService
+ from app.schemas import admin as schema
+ from app.schemas.contracts import Envelope
+ 
+@@ -290,7 +291,17 @@
+     if status:
+         conditions.append(Order.status == status)
+     return ok(
+-        request, listing(service.db, Order, lambda r: fields(r, ORDER_FIELDS), **p, conditions=conditions)
++        request,
++        listing(
++            service.db,
++            Order,
++            lambda r: {
++                **fields(r, ORDER_FIELDS),
++                "interview_credits": BillingService(service.rt, service.db, r.user_id).order_credits(r),
++            },
++            **p,
++            conditions=conditions,
++        ),
+     )
+ 
+ 
+--- a/app/api/billing.py
++++ b/app/api/billing.py
+@@ -12,10 +12,23 @@
+ 
+ def catalog(db):
+     from app.db.admin_models import Product
++
+     rows = db.scalars(select(Product).where(Product.status == "PUBLISHED")).all()
+-    configured = {r.code: {"code": r.code, "name": r.name, "amount_minor": r.amount_minor,
+-                          "credits": r.credits, "currency": r.currency, "version": r.version} for r in rows}
+-    return list(configured.values()) + [{"code": k, **v, "currency": "CNY"} for k, v in PRODUCTS.items() if k not in configured]
++    configured = {
++        r.code: {
++            "code": r.code,
++            "name": r.name,
++            "amount_minor": r.amount_minor,
++            "credits": r.credits,
++            "interview_credits": r.interview_credits,
++            "currency": r.currency,
++            "version": r.version,
++        }
++        for r in rows
++    }
++    return list(configured.values()) + [
++        {"code": k, **v, "currency": "CNY"} for k, v in PRODUCTS.items() if k not in configured
++    ]
+ 
+ 
+ @router.get("/products", response_model=Envelope)
+@@ -32,10 +45,7 @@
+ 
+ @router.get("/entitlements", response_model=Envelope)
+ def entitlements(request: Request, db=Depends(db_session, scope="function"), user=Depends(current_user)):
+-    reserved = db.scalar(
+-        select(func.count()).select_from(Usage).where(Usage.user_id == user.id, Usage.status == "RESERVED")
+-    )
+-    return ok(request, {"remaining_interviews": user.credits, "reserved_interviews": reserved})
++    return ok(request, service(BillingService, request, db, user).entitlements(user))
+ 
+ 
+ @router.get("/usage", response_model=Envelope)
+@@ -61,6 +71,7 @@
+                     "interview_id": r.interview_id,
+                     "usage_type": r.usage_type,
+                     "quantity": r.quantity,
++                    "credit_allocations": service(BillingService, request, db, user).allocations(r),
+                     "status": r.status,
+                     "amount_minor": r.amount_minor,
+                     "created_at": str(r.created_at),
+@@ -100,7 +111,7 @@
+     return ok(
+         request,
+         {
+-            "items": [BillingService.order_view(r) for r in rows],
++            "items": [service(BillingService, request, db, user).order_view(r) for r in rows],
+             "total": total,
+             "page": page,
+             "page_size": page_size,
+@@ -112,7 +123,9 @@
+ def order(
+     order_id: str, request: Request, db=Depends(db_session, scope="function"), user=Depends(current_user)
+ ):
+-    return ok(request, BillingService.order_view(owned(db, Order, order_id, user.id)))
++    return ok(
++        request, service(BillingService, request, db, user).order_view(owned(db, Order, order_id, user.id))
++    )
+ 
+ 
+ @router.post("/orders/{order_id}/dev-pay", response_model=Envelope)
+--- a/app/db/admin_models.py
++++ b/app/db/admin_models.py
+@@ -3,12 +3,14 @@
+ from sqlalchemy.orm import registry
+ 
+ from app.db.admin_schema_v1 import define_tables
++from app.db.entitlement_schema_v1 import product_credits_column
+ 
+ mapper_registry = registry()
+ 
+ 
+ def register(metadata):
+     names = define_tables(metadata)
++    metadata.tables["product_skus"].append_column(product_credits_column())
+     mapping = {
+         "AdminUser": "admin_users",
+         "AdminSession": "admin_sessions",
+--- a/app/db/admin_repository.py
++++ b/app/db/admin_repository.py
+@@ -2,6 +2,7 @@
+ 
+ from app.db.models import Interview, JobProfile, Order, User
+ from app.db.repository import page_query
++from app.modules.billing.service import credit_balances
+ 
+ 
+ def fields(row, names):
+@@ -67,6 +68,7 @@
+             {
+                 **fields(r, "id status credits created_at"),
+                 "nickname": mask(r.nickname),
++                **credit_balances(db, r),
+                 "interview_count": interviews.get(r.id, 0),
+                 "paid_minor": payments.get(r.id, 0),
+             }
+--- /dev/null
++++ b/app/db/entitlement_models.py
+@@ -0,0 +1,21 @@
++"""ORM mappings for typed interview entitlements."""
++
++from sqlalchemy.orm import registry
++
++from app.db.entitlement_schema_v1 import define_tables
++from app.db.models import Base
++
++mapper_registry = registry()
++tables = define_tables(Base.metadata)
++
++
++class CreditBalance:
++    pass
++
++
++class CreditAllocation:
++    pass
++
++
++mapper_registry.map_imperatively(CreditBalance, tables[0])
++mapper_registry.map_imperatively(CreditAllocation, tables[1])
+--- /dev/null
++++ b/app/db/entitlement_schema_v1.py
+@@ -0,0 +1,95 @@
++"""Frozen schema for per-mode balances and the source of each ledger movement."""
++
++import sqlalchemy as sa
++
++from app.core.security import new_id, utcnow
++from app.db.types import MYSQL_TABLE_OPTIONS, UTCDateTime
++
++
++def product_credits_column():
++    return sa.Column(
++        "interview_credits",
++        sa.JSON,
++        nullable=True,
++        comment="按面试类型发放的次数：TEXT=文字、VOICE=语音、VIDEO=视频；NULL=历史通用次数套餐",
++    )
++
++
++def define_tables(metadata):
++    balances = sa.Table(
++        "interview_credit_balances",
++        metadata,
++        sa.Column(
++            "id", sa.String(36), primary_key=True, default=new_id, comment="分类权益余额记录 ID（UUID）"
++        ),
++        sa.Column(
++            "user_id",
++            sa.String(36),
++            sa.ForeignKey("users.id"),
++            nullable=False,
++            comment="权益所属用户 ID，关联 users.id",
++        ),
++        sa.Column(
++            "mode", sa.String(16), nullable=False, comment="面试类型：TEXT=文字、VOICE=语音、VIDEO=视频"
++        ),
++        sa.Column(
++            "remaining",
++            sa.Integer,
++            nullable=False,
++            default=0,
++            server_default="0",
++            comment="该类型可用次数，单位次；不含已预占次数和历史通用次数",
++        ),
++        sa.Column("created_at", UTCDateTime(), default=utcnow, nullable=False, comment="创建时间（UTC）"),
++        sa.Column(
++            "updated_at",
++            UTCDateTime(),
++            default=utcnow,
++            onupdate=utcnow,
++            nullable=False,
++            comment="最后变更时间（UTC）",
++        ),
++        sa.UniqueConstraint("user_id", "mode", name="uq_credit_balance_user_mode"),
++        sa.CheckConstraint("remaining >= 0", name="ck_credit_balance_nonnegative"),
++        comment="按文字、语音、视频分别管理可用面试次数；旧通用次数继续存储于 users.credits",
++        **MYSQL_TABLE_OPTIONS,
++    )
++    allocations = sa.Table(
++        "usage_credit_allocations",
++        metadata,
++        sa.Column(
++            "id", sa.String(36), primary_key=True, default=new_id, comment="权益流水分类明细 ID（UUID）"
++        ),
++        sa.Column(
++            "usage_id",
++            sa.String(36),
++            sa.ForeignKey("usage_ledger.id"),
++            nullable=False,
++            comment="权益流水 ID，关联 usage_ledger.id",
++        ),
++        sa.Column(
++            "mode",
++            sa.String(16),
++            nullable=False,
++            comment="次数来源：TEXT/VOICE/VIDEO=对应类型；UNIVERSAL=历史通用次数",
++        ),
++        sa.Column(
++            "quantity",
++            sa.Integer,
++            nullable=False,
++            comment="该类型次数变化，单位次；发放为正、预占或退款为负；释放按原来源返还",
++        ),
++        sa.Column("created_at", UTCDateTime(), default=utcnow, nullable=False, comment="创建时间（UTC）"),
++        sa.Column(
++            "updated_at",
++            UTCDateTime(),
++            default=utcnow,
++            onupdate=utcnow,
++            nullable=False,
++            comment="最后变更时间（UTC）",
++        ),
++        sa.UniqueConstraint("usage_id", "mode", name="uq_usage_credit_mode"),
++        comment="权益流水的类型分配明细，保证取消、重试及退款使用原始类型；历史无明细流水视为通用次数",
++        **MYSQL_TABLE_OPTIONS,
++    )
++    return [balances, allocations]
+--- a/app/db/models.py
++++ b/app/db/models.py
+@@ -240,4 +240,7 @@
+ Base.metadata.tables["user_consents"].c.consent_type.comment = "授权类型：PRIVACY/TERMS/AI_PROCESSING/MICROPHONE/CAMERA/SCREEN_CAPTURE；SUPPORT_REVIEW=后台人工审阅授权"
+ 
+ # Register the new schema after the historical business COMMENT snapshot was applied.
+-from app.db import admin_models  # noqa: E402, F401
++from app.db import (  # noqa: E402, F401
++    admin_models,
++    entitlement_models,
++)
+--- a/app/modules/admin/service.py
++++ b/app/modules/admin/service.py
+@@ -22,12 +22,12 @@
+ from app.db.models import AICallLog, Consent, Interview, JobProfile, MediaAsset, Order, Report, Usage, User
+ from app.modules.admin.auth import AdminAuth, create_admin
+ from app.modules.admin.security import permits
+-from app.modules.billing.service import BillingService
++from app.modules.billing.service import BillingService, credit_balances
+ from app.modules.identity.service import IdentityService
+ from app.modules.interview.service import InterviewService
+ from app.modules.shared import Service, dump
+ 
+-PRODUCT_FIELDS = "id code version name kind amount_minor original_minor credits validity_days currency description status published_at created_at"
++PRODUCT_FIELDS = "id code version name kind amount_minor original_minor credits interview_credits validity_days currency description status published_at created_at"
+ ORDER_FIELDS = "id user_id product_code amount_minor credits currency status paid_at refunded_at provider_trade_no created_at"
+ QUALITY_FIELDS = "id interview_id assignee_id created_by reason status tags conclusion created_at"
+ 
+@@ -83,13 +83,17 @@
+         consents = self.db.scalars(select(Consent).where(Consent.user_id == uid)).all()
+         return {
+             **fields(row, "id status credits created_at"),
++            **credit_balances(self.db, row),
+             "nickname": mask(row.nickname),
+             "consents": [fields(c, "id consent_type policy_version revoked_at created_at") for c in consents],
+             "interviews": interview_list(self.db, "", None, None, 1, 10, uid),
+             "usage": listing(
+                 self.db,
+                 Usage,
+-                lambda r: fields(r, "id usage_type quantity amount_minor status created_at"),
++                lambda r: {
++                    **fields(r, "id usage_type quantity amount_minor status created_at"),
++                    "credit_allocations": BillingService(self.rt, self.db, uid).allocations(r),
++                },
+                 conditions=(Usage.user_id == uid,),
+             ),
+         }
+@@ -102,31 +106,23 @@
+         return {"id": uid, "status": row.status}
+ 
+     def grant(self, uid, data):
+-        result = self.db.execute(
+-            update(User)
+-            .where(User.id == uid, User.status == "ACTIVE")
+-            .values(credits=User.credits + data.quantity)
+-        )
+-        require(result.rowcount == 1, "USER_INVALID_STATE", "仅能给正常账号补发权益", 409)
+-        entry = Usage(
+-            user_id=uid,
+-            usage_type="ADMIN_GRANT",
+-            quantity=data.quantity,
+-            status="GRANTED",
+-            idempotency_key="admin-grant:" + new_id(),
+-        )
+-        self.db.add(entry)
+-        self.db.flush()
++        billing = BillingService(self.rt, self.db, uid)
++        user = billing.lock_user()
++        require(user and user.status == "ACTIVE", "USER_INVALID_STATE", "仅能给正常账号补发权益", 409)
++        billing.change_balance(data.mode, data.quantity)
++        entry = billing.ledger(
++            "ADMIN_GRANT", {data.mode: data.quantity}, "GRANTED", "admin-grant:" + new_id()
++        )
+         self.audit("ENTITLEMENT_GRANTED", uid, data.reason)
+         if data.ticket:
+             self.audit("ENTITLEMENT_TICKET", entry.id, data.ticket)
+-        user = self.get(User, uid)
+         self.db.refresh(user)
+         return {
+             "id": entry.id,
+             "user_id": uid,
+             "quantity": data.quantity,
+-            "remaining_interviews": user.credits,
++            "mode": data.mode,
++            **credit_balances(self.db, user),
+             "status": entry.status,
+         }
+ 
+--- a/app/modules/billing/service.py
++++ b/app/modules/billing/service.py
+@@ -1,65 +1,212 @@
+-from sqlalchemy import select, update
++from sqlalchemy import func, select, update
+ 
+ from app.core.errors import require
+ from app.core.security import utcnow
+-from app.db.models import Order, Usage, User
++from app.db.entitlement_models import CreditAllocation, CreditBalance
++from app.db.models import Interview, Order, Usage, User
+ from app.db.repository import owned
+ from app.modules.shared import Service
+ 
++MODES = ("TEXT", "VOICE", "VIDEO")
++MODE_LABELS = {"TEXT": "文字", "VOICE": "语音", "VIDEO": "视频"}
+ PRODUCTS = {
+-    "SINGLE": {"name": "单次训练", "amount_minor": 990, "credits": 1},
+-    "PACK_10": {"name": "10 次训练套餐", "amount_minor": 6900, "credits": 10},
+-    "MONTHLY": {"name": "月度训练额度包", "amount_minor": 9900, "credits": 20},
++    "SINGLE": {
++        "name": "单次文字训练",
++        "amount_minor": 990,
++        "credits": 1,
++        "interview_credits": {"TEXT": 1, "VOICE": 0, "VIDEO": 0},
++    },
++    "STARTER": {
++        "name": "多模式体验套餐",
++        "amount_minor": 3990,
++        "credits": 6,
++        "interview_credits": {"TEXT": 3, "VOICE": 2, "VIDEO": 1},
++    },
++    "PACK_10": {
++        "name": "10 次组合训练套餐",
++        "amount_minor": 6900,
++        "credits": 10,
++        "interview_credits": {"TEXT": 5, "VOICE": 3, "VIDEO": 2},
++    },
++    "MONTHLY": {
++        "name": "20 次组合训练套餐",
++        "amount_minor": 9900,
++        "credits": 20,
++        "interview_credits": {"TEXT": 10, "VOICE": 6, "VIDEO": 4},
++    },
+ }
+ 
+ 
++def credit_balances(db, user):
++    typed = dict.fromkeys(MODES, 0)
++    for row in db.scalars(select(CreditBalance).where(CreditBalance.user_id == user.id)):
++        typed[row.mode] = row.remaining
++    return {
++        "remaining_interviews": user.credits + sum(typed.values()),
++        "universal_interviews": user.credits,
++        "interview_credits": typed,
++    }
++
++
+ class BillingService(Service):
+-    def reserve(self, interview_id):
+-        result = self.db.execute(
+-            update(User).where(User.id == self.uid, User.credits > 0).values(credits=User.credits - 1)
+-        )
+-        require(result.rowcount == 1, "INTERVIEW_QUOTA_NOT_ENOUGH", "面试额度不足", 403)
+-        self.db.add(
+-            Usage(
+-                user_id=self.uid,
+-                interview_id=interview_id,
+-                usage_type="INTERVIEW",
+-                quantity=-1,
+-                status="RESERVED",
+-                idempotency_key=f"interview:{interview_id}",
+-            )
+-        )
++    def lock_user(self):
++        # All balance changes for one owner serialize here, including purchases and grants.
++        self.db.execute(update(User).where(User.id == self.uid).values(updated_at=utcnow()))
++        return self.db.scalar(
++            select(User)
++            .where(User.id == self.uid)
++            .with_for_update()
++            .execution_options(populate_existing=True)
++        )
++
++    def change_balance(self, mode, quantity):
++        if mode == "UNIVERSAL":
++            result = self.db.execute(
++                update(User)
++                .where(User.id == self.uid, User.credits + quantity >= 0)
++                .values(credits=User.credits + quantity)
++            )
++        else:
++            result = self.db.execute(
++                update(CreditBalance)
++                .where(
++                    CreditBalance.user_id == self.uid,
++                    CreditBalance.mode == mode,
++                    CreditBalance.remaining + quantity >= 0,
++                )
++                .values(remaining=CreditBalance.remaining + quantity)
++            )
++            if not result.rowcount and quantity > 0:
++                self.db.add(CreditBalance(user_id=self.uid, mode=mode, remaining=quantity))
++                self.db.flush()
++                return True
++        return bool(result.rowcount)
++
++    def allocations(self, usage):
++        values = self.db.scalars(select(CreditAllocation).where(CreditAllocation.usage_id == usage.id)).all()
++        return {row.mode: row.quantity for row in values} or {"UNIVERSAL": usage.quantity}
++
++    def ledger(self, kind, amounts, status, key, interview_id=None, amount_minor=0):
++        row = Usage(
++            user_id=self.uid,
++            interview_id=interview_id,
++            usage_type=kind,
++            quantity=sum(amounts.values()),
++            amount_minor=amount_minor,
++            status=status,
++            idempotency_key=key,
++        )
++        self.db.add(row)
++        self.db.flush()
++        for mode, quantity in amounts.items():
++            if quantity:
++                self.db.add(CreditAllocation(usage_id=row.id, mode=mode, quantity=quantity))
++        self.db.flush()
++        return row
++
++    def entitlements(self, user=None):
++        user = user or self.db.get(User, self.uid)
++        reserved = dict.fromkeys(MODES, 0)
++        for mode, count in self.db.execute(
++            select(Interview.mode, func.count())
++            .join(Usage, Usage.interview_id == Interview.id)
++            .where(Usage.user_id == self.uid, Usage.status == "RESERVED")
++            .group_by(Interview.mode)
++        ):
++            reserved[mode] = count
++        return {
++            **credit_balances(self.db, user),
++            "reserved_interviews": sum(reserved.values()),
++            "reserved_by_mode": reserved,
++        }
++
++    def reserve(self, interview_id, retry=False):
++        interview = owned(self.db, Interview, interview_id, self.uid)
++        mode = interview.mode
++        self.lock_user()
++        source = mode if self.change_balance(mode, -1) else "UNIVERSAL"
++        require(
++            source != "UNIVERSAL" or self.change_balance("UNIVERSAL", -1),
++            "INTERVIEW_QUOTA_NOT_ENOUGH",
++            f"{MODE_LABELS[mode]}面试次数不足",
++            403,
++        )
++        if retry:
++            ledger = self.db.scalar(select(Usage).where(Usage.idempotency_key == f"interview:{interview_id}"))
++            require(ledger and ledger.status == "RELEASED", "BILLING_INVALID_STATE", "面试预占不可重试", 409)
++            self.db.query(CreditAllocation).filter(CreditAllocation.usage_id == ledger.id).delete(
++                synchronize_session=False
++            )
++            ledger.status = "RESERVED"
++            self.db.add(CreditAllocation(usage_id=ledger.id, mode=source, quantity=-1))
++        else:
++            self.ledger("INTERVIEW", {source: -1}, "RESERVED", f"interview:{interview_id}", interview_id)
+ 
+     def settle(self, interview_id, consume):
++        self.lock_user()
+         row = self.db.scalar(
+-            select(Usage).where(Usage.idempotency_key == f"interview:{interview_id}").with_for_update()
++            select(Usage)
++            .where(Usage.user_id == self.uid, Usage.idempotency_key == f"interview:{interview_id}")
++            .with_for_update()
+         )
+         if row and row.status == "RESERVED":
+             row.status = "CONSUMED" if consume else "RELEASED"
+             if not consume:
+-                self.db.execute(update(User).where(User.id == self.uid).values(credits=User.credits + 1))
++                for mode, quantity in self.allocations(row).items():
++                    self.change_balance(mode, -quantity)
+ 
+     def order(self, data, key):
+         def create():
+             from app.db.admin_models import OrderSnapshot, Product
+-            version = self.db.scalar(select(Product).where(Product.code == data.product_code, Product.status == "PUBLISHED").order_by(Product.version.desc()).limit(1))
+-            product = ({"name": version.name, "amount_minor": version.amount_minor, "credits": version.credits} if version else PRODUCTS.get(data.product_code))
++
++            version = self.db.scalar(
++                select(Product)
++                .where(Product.code == data.product_code, Product.status == "PUBLISHED")
++                .order_by(Product.version.desc())
++                .limit(1)
++            )
++            product = (
++                {
++                    name: getattr(version, name)
++                    for name in ("name", "amount_minor", "credits", "currency", "interview_credits")
++                }
++                if version
++                else PRODUCTS.get(data.product_code)
++            )
+             require(product, "PRODUCT_NOT_FOUND", "商品未上架", 404)
+             row = Order(
+                 user_id=self.uid,
+                 product_code=data.product_code,
+                 amount_minor=product["amount_minor"],
+                 credits=product["credits"],
++                currency=product.get("currency", "CNY"),
+             )
+             self.db.add(row)
+             self.db.flush()
+-            self.db.add(OrderSnapshot(order_id=row.id, product_id=version.id if version else None,
+-                                      snapshot_json={"code": data.product_code, "version": version.version if version else 0,
+-                                                     "currency": "CNY", **product}))
++            self.db.add(
++                OrderSnapshot(
++                    order_id=row.id,
++                    product_id=version.id if version else None,
++                    snapshot_json={
++                        "code": data.product_code,
++                        "version": version.version if version else 0,
++                        "currency": "CNY",
++                        **product,
++                    },
++                )
++            )
++            self.db.flush()
+             self.audit("ORDER_CREATED", row.id)
+             return self.order_view(row)
+ 
+         return self.idem("order:create", key, data.model_dump(), create)
++
++    def order_credits(self, row):
++        from app.db.admin_models import OrderSnapshot
++
++        snapshot = self.db.scalar(select(OrderSnapshot).where(OrderSnapshot.order_id == row.id))
++        breakdown = snapshot.snapshot_json.get("interview_credits") if snapshot else None
++        return breakdown
+ 
+     def pay(self, order_id, key):
+         require(
+@@ -70,6 +217,7 @@
+         )
+ 
+         def pay_once():
++            self.lock_user()
+             row = owned(self.db, Order, order_id, self.uid)
+             require(row.status in ("PENDING", "PAID"), "BILLING_INVALID_STATE", "订单不可支付", 409)
+             changed = self.db.execute(
+@@ -78,18 +226,13 @@
+                 .values(status="PAID", paid_at=utcnow(), provider_trade_no=f"dev:{order_id}")
+             )
+             if changed.rowcount:
+-                self.db.execute(
+-                    update(User).where(User.id == self.uid).values(credits=User.credits + row.credits)
+-                )
+-                self.db.add(
+-                    Usage(
+-                        user_id=self.uid,
+-                        usage_type="PURCHASE",
+-                        quantity=row.credits,
+-                        amount_minor=row.amount_minor,
+-                        status="GRANTED",
+-                        idempotency_key=f"order:{order_id}",
+-                    )
++                amounts = self.order_credits(row)
++                amounts = amounts if amounts is not None else {"UNIVERSAL": row.credits}
++                for mode, quantity in amounts.items():
++                    if quantity:
++                        self.change_balance(mode, quantity)
++                self.ledger(
++                    "PURCHASE", amounts, "GRANTED", f"order:{order_id}", amount_minor=row.amount_minor
+                 )
+             self.db.refresh(row)
+             self.audit("DEV_ORDER_PAID", row.id)
+@@ -106,6 +249,7 @@
+         )
+ 
+         def refund_once():
++            self.lock_user()
+             row = owned(self.db, Order, order_id, self.uid)
+             require(row.status in ("PAID", "REFUNDED"), "BILLING_INVALID_STATE", "订单不可退款", 409)
+             changed = self.db.execute(
+@@ -114,21 +258,21 @@
+                 .values(status="REFUNDED", refunded_at=utcnow())
+             )
+             if changed.rowcount:
+-                result = self.db.execute(
+-                    update(User)
+-                    .where(User.id == self.uid, User.credits >= row.credits)
+-                    .values(credits=User.credits - row.credits)
+-                )
+-                require(result.rowcount == 1, "BILLING_CREDITS_USED", "套餐额度已使用，不能全额退回", 409)
+-                self.db.add(
+-                    Usage(
+-                        user_id=self.uid,
+-                        usage_type="REFUND",
+-                        quantity=-row.credits,
+-                        amount_minor=-row.amount_minor,
+-                        status="REFUNDED",
+-                        idempotency_key=f"refund:{order_id}",
++                amounts = self.order_credits(row)
++                amounts = amounts if amounts is not None else {"UNIVERSAL": row.credits}
++                for mode, quantity in amounts.items():
++                    require(
++                        not quantity or self.change_balance(mode, -quantity),
++                        "BILLING_CREDITS_USED",
++                        "套餐对应类型额度已使用或预占，不能全额退回",
++                        409,
+                     )
++                self.ledger(
++                    "REFUND",
++                    {mode: -quantity for mode, quantity in amounts.items()},
++                    "REFUNDED",
++                    f"refund:{order_id}",
++                    amount_minor=-row.amount_minor,
+                 )
+             self.db.refresh(row)
+             self.audit("ORDER_REFUNDED", row.id)
+@@ -136,18 +280,20 @@
+ 
+         return self.idem(f"order:refund:{order_id}", key, {}, refund_once)
+ 
+-    @staticmethod
+-    def order_view(row):
++    def order_view(self, row):
+         return {
+-            name: getattr(row, name)
+-            for name in [
+-                "id",
+-                "product_code",
+-                "amount_minor",
+-                "credits",
+-                "currency",
+-                "status",
+-                "paid_at",
+-                "refunded_at",
+-            ]
++            **{
++                name: getattr(row, name)
++                for name in (
++                    "id",
++                    "product_code",
++                    "amount_minor",
++                    "credits",
++                    "currency",
++                    "status",
++                    "paid_at",
++                    "refunded_at",
++                )
++            },
++            "interview_credits": self.order_credits(row),
+         }
+--- a/app/modules/identity/service.py
++++ b/app/modules/identity/service.py
+@@ -92,11 +92,13 @@
+         return {"logged_out": True}
+ 
+     def view(self, user):
++        from app.modules.billing.service import credit_balances
++
+         return {
+             "id": user.id,
+             "nickname": user.nickname,
+             "status": user.status,
+-            "remaining_interviews": user.credits,
++            **credit_balances(self.db, user),
+             "created_at": str(user.created_at),
+         }
+ 
+--- a/app/modules/interview/service.py
++++ b/app/modules/interview/service.py
+@@ -20,6 +20,9 @@
+     def create(self, data, key):
+         def create_once():
+             IdentityService(self.rt, self.db, self.uid).require_consents("PRIVACY", "TERMS", "AI_PROCESSING")
++            # Lock the owner before inserting FK children, so concurrent MySQL
++            # reservations cannot deadlock while upgrading shared user locks.
++            BillingService(self.rt, self.db, self.uid).lock_user()
+             job = owned(self.db, JobProfile, data.job_profile_id, self.uid)
+             require(job.status == "READY", "JOB_NOT_READY", "岗位解析未完成", 409)
+             if data.resume_asset_id:
+--- a/app/modules/privacy/service.py
++++ b/app/modules/privacy/service.py
+@@ -1,6 +1,7 @@
+-from sqlalchemy import delete, select
++from sqlalchemy import delete, select, update
+ 
+ from app.core.security import new_id, utcnow
++from app.db.entitlement_models import CreditBalance
+ from app.db.models import (
+     Consent,
+     Feedback,
+@@ -85,6 +86,7 @@
+             task.payload_encrypted, task.result_encrypted = None, None
+             if task.status in ("PENDING", "RUNNING", "RETRYING", "QUEUED"):
+                 task.status = "CANCELLED"
++        self.db.execute(update(CreditBalance).where(CreditBalance.user_id == self.uid).values(remaining=0))
+         user = self.db.get(User, self.uid)
+         user.nickname, user.openid_hash, user.status, user.credits = "[已删除]", new_id(), "DELETED", 0
+         self.audit("USER_DATA_DELETED", user.id)
+--- a/app/schemas/admin.py
++++ b/app/schemas/admin.py
+@@ -36,6 +36,13 @@
+ class EntitlementGrant(Reason):
+     quantity: int = Field(ge=1, le=1000)
+     ticket: str = Field("", max_length=100)
++    mode: Literal["TEXT", "VOICE", "VIDEO", "UNIVERSAL"] = "UNIVERSAL"
++
++
++class ModeCredits(DTO):
++    TEXT: int = Field(0, ge=0, le=10000)
++    VOICE: int = Field(0, ge=0, le=10000)
++    VIDEO: int = Field(0, ge=0, le=10000)
+ 
+ 
+ class ProductInput(Reason):
+@@ -44,12 +51,22 @@
+     kind: Literal["SINGLE", "MONTH", "QUARTER", "YEAR", "PACK"]
+     amount_minor: int = Field(ge=1, le=100000000)
+     original_minor: int = Field(ge=1, le=100000000)
+-    credits: int = Field(ge=1, le=10000)
++    credits: Optional[int] = Field(None, ge=1, le=10000)
++    interview_credits: Optional[ModeCredits] = None
+     validity_days: int = Field(ge=1, le=3650)
+     description: str = Field("", max_length=500)
+ 
+     @model_validator(mode="after")
+     def prices(self):
++        if self.interview_credits is not None:
++            total = sum(self.interview_credits.model_dump().values())
++            if not 1 <= total <= 10000:
++                raise ValueError("套餐分类次数合计必须为 1 至 10000 次")
++            if self.credits is not None and self.credits != total:
++                raise ValueError("套餐总次数必须等于各面试类型次数之和")
++            self.credits = total
++        elif self.credits is None:
++            raise ValueError("请设置面试类型次数")
+         if self.original_minor < self.amount_minor:
+             raise ValueError("原价不能小于售价")
+         return self
+--- a/app/workers/processor.py
++++ b/app/workers/processor.py
+@@ -6,7 +6,7 @@
+ from app.core.errors import BusinessError, require
+ from app.core.security import new_id, utcnow
+ from app.core.state import transition
+-from app.db.models import Interview, JobProfile, MediaAsset, ResumeAsset, Task, Turn, Usage, User
++from app.db.models import Interview, JobProfile, MediaAsset, ResumeAsset, Task, Turn, User
+ from app.modules.ai_engine.service import EngineService
+ from app.modules.billing.service import BillingService
+ from app.modules.job_profile.service import JobService, ResumeService
+@@ -165,12 +165,7 @@
+     if task.event_type == "PREPARE_INTERVIEW":
+         row = db.get(Interview, task.aggregate_id)
+         require(not row.deleted_at and row.status == "FAILED", "INTERVIEW_INVALID_STATE", "面试不可重试", 409)
+-        ledger = db.scalar(select(Usage).where(Usage.idempotency_key == f"interview:{row.id}"))
+-        result = db.execute(
+-            update(User).where(User.id == user_id, User.credits > 0).values(credits=User.credits - 1)
+-        )
+-        require(result.rowcount, "INTERVIEW_QUOTA_NOT_ENOUGH", "重试需要面试额度", 403)
+-        ledger.status = "RESERVED"
++        BillingService(rt, db, user_id).reserve(row.id, retry=True)
+         transition(row, "PREPARING")
+     elif task.event_type == "GENERATE_REPORT":
+         row = db.get(Interview, task.aggregate_id)
+--- a/tests/test_admin.py
++++ b/tests/test_admin.py
+@@ -405,6 +405,12 @@
+         assert db.get(Order, order["id"]).status == "PAID"
+         db.get(Order, order["id"]).provider_trade_no = "dev:" + order["id"]
+         db.get(User, uid).credits = 0
++        from app.db.entitlement_models import CreditBalance
++
++        balance = db.scalar(
++            select(CreditBalance).where(CreditBalance.user_id == uid, CreditBalance.mode == "TEXT")
++        )
++        balance.remaining = 0
+     assert client.post("/api/v1/admin/refunds", headers=finance, json=payload).status_code == 409
+     with rt.db.session() as db:
+         assert db.scalar(select(RefundRequest.id)) is None
+--- /dev/null
++++ b/tests/test_typed_entitlements.py
+@@ -0,0 +1,250 @@
++from concurrent.futures import ThreadPoolExecutor
++
++from sqlalchemy import select
++
++from app.core.errors import BusinessError
++from app.db.entitlement_models import CreditAllocation
++from app.db.models import Order, Usage, User
++from app.modules.interview.service import InterviewService
++from app.providers.ai import MockProvider
++from app.schemas.contracts import InterviewInput
++from tests.conftest import data, interview, job, login
++from tests.test_admin import admin_login
++from tests.test_billing_tasks import FailingProvider, exhaust
++
++BUNDLE = {"TEXT": 3, "VOICE": 2, "VIDEO": 1}
++
++
++def test_failed_preparation_returns_typed_credit_and_retry_reserves_it_again(client):
++    headers, uid = typed_user(client)
++    buy(client, headers, "SINGLE")
++    job_id = job(client, headers)
++    rt = client.app.state.runtime
++    rt.provider = FailingProvider()
++    created = data(
++        client.post(
++            "/api/v1/interviews",
++            headers={**headers, "Idempotency-Key": "failed-plan"},
++            json={"job_profile_id": job_id, "config": {"mode": "TEXT"}},
++        )
++    )
++    exhaust(rt, created["task_id"])
++    assert balance(client, headers)["interview_credits"]["TEXT"] == 1
++    assert balance(client, headers)["reserved_interviews"] == 0
++    rt.provider = MockProvider()
++    data(client.post(f"/api/v1/tasks/{created['task_id']}/retry", headers=headers))
++    assert (
++        data(client.get(f"/api/v1/interviews/{created['interview_id']}", headers=headers))["status"]
++        == "READY"
++    )
++    assert balance(client, headers)["interview_credits"]["TEXT"] == 0
++    assert balance(client, headers)["reserved_by_mode"]["TEXT"] == 1
++
++
++def test_concurrent_creation_cannot_spend_the_same_typed_credit_twice(client):
++    headers, uid = typed_user(client)
++    buy(client, headers, "SINGLE")
++    job_id = job(client, headers)
++    rt = client.app.state.runtime
++
++    def create_one(index):
++        try:
++            with rt.db.session() as db:
++                return InterviewService(rt, db, uid).create(
++                    InterviewInput(job_profile_id=job_id, config={"mode": "TEXT"}), f"concurrent-{index}"
++                )
++        except BusinessError as error:
++            return error.code
++
++    with ThreadPoolExecutor(max_workers=3) as pool:
++        results = list(pool.map(create_one, range(3)))
++    assert sum(isinstance(result, dict) for result in results) == 1
++    assert results.count("INTERVIEW_QUOTA_NOT_ENOUGH") == 2
++    assert balance(client, headers)["interview_credits"]["TEXT"] == 0
++    assert balance(client, headers)["reserved_by_mode"]["TEXT"] == 1
++
++
++def balance(client, headers):
++    return data(client.get("/api/v1/billing/entitlements", headers=headers))
++
++
++def buy(client, headers, product="STARTER", key="order"):
++    order = data(
++        client.post(
++            "/api/v1/billing/orders",
++            headers={**headers, "Idempotency-Key": key},
++            json={"product_code": product},
++        )
++    )
++    return data(
++        client.post(
++            f"/api/v1/billing/orders/{order['id']}/dev-pay",
++            headers={**headers, "Idempotency-Key": "pay-" + key},
++        )
++    )
++
++
++def typed_user(client):
++    headers, uid = login(client)
++    with client.app.state.runtime.db.session() as db:
++        db.get(User, uid).credits = 0
++    return headers, uid
++
++
++def test_bundle_grants_each_mode_once_and_preserves_order_snapshot(client):
++    headers, uid = typed_user(client)
++    order = buy(client, headers)
++    assert order["interview_credits"] == BUNDLE
++    for key in ("pay-again", "pay-again"):
++        data(
++            client.post(
++                f"/api/v1/billing/orders/{order['id']}/dev-pay", headers={**headers, "Idempotency-Key": key}
++            )
++        )
++    result = balance(client, headers)
++    assert result["interview_credits"] == BUNDLE
++    assert result["remaining_interviews"] == 6 and result["universal_interviews"] == 0
++    assert data(client.get("/api/v1/users/me", headers=headers))["interview_credits"] == BUNDLE
++    ledger = data(client.get("/api/v1/billing/usage", headers=headers))["items"]
++    purchases = [entry for entry in ledger if entry["usage_type"] == "PURCHASE"]
++    assert len(purchases) == 1 and purchases[0]["credit_allocations"] == BUNDLE
++    other, _ = login(client, "other")
++    assert client.get(f"/api/v1/billing/orders/{order['id']}", headers=other).status_code == 404
++    refunded = data(
++        client.post(
++            f"/api/v1/billing/orders/{order['id']}/refund", headers={**headers, "Idempotency-Key": "refund"}
++        )
++    )
++    assert refunded["interview_credits"] == BUNDLE
++    assert balance(client, headers)["remaining_interviews"] == 0
++    data(
++        client.post(
++            f"/api/v1/billing/orders/{order['id']}/refund",
++            headers={**headers, "Idempotency-Key": "refund-again"},
++        )
++    )
++    assert balance(client, headers)["remaining_interviews"] == 0
++
++
++def test_reservation_uses_only_selected_mode_and_cancellation_restores_same_source(client):
++    headers, _ = typed_user(client)
++    buy(client, headers)
++    row = interview(client, headers, config={"mode": "VIDEO"}, key="video")
++    result = balance(client, headers)
++    assert result["interview_credits"] == {"TEXT": 3, "VOICE": 2, "VIDEO": 0}
++    assert result["reserved_by_mode"] == {"TEXT": 0, "VOICE": 0, "VIDEO": 1}
++    denied = client.post(
++        "/api/v1/interviews",
++        headers={**headers, "Idempotency-Key": "no-video"},
++        json={"job_profile_id": row["job_profile_id"], "config": {"mode": "VIDEO"}},
++    )
++    assert denied.status_code == 403 and denied.json()["code"] == "INTERVIEW_QUOTA_NOT_ENOUGH"
++    assert balance(client, headers)["remaining_interviews"] == 5
++    for key in ("cancel", "cancel-again"):
++        data(
++            client.post(f"/api/v1/interviews/{row['id']}/cancel", headers={**headers, "Idempotency-Key": key})
++        )
++    assert balance(client, headers)["interview_credits"] == BUNDLE
++    assert balance(client, headers)["reserved_interviews"] == 0
++
++
++def test_typed_credits_take_priority_and_legacy_credits_remain_usable(client):
++    headers, _ = login(client)
++    buy(client, headers, "SINGLE")
++    text = interview(client, headers, config={"mode": "TEXT"}, key="text")
++    assert balance(client, headers)["universal_interviews"] == 3
++    assert balance(client, headers)["interview_credits"]["TEXT"] == 0
++    video = interview(client, headers, config={"mode": "VIDEO"}, key="video")
++    assert balance(client, headers)["universal_interviews"] == 2
++    data(
++        client.post(
++            f"/api/v1/interviews/{video['id']}/cancel", headers={**headers, "Idempotency-Key": "cancel-video"}
++        )
++    )
++    assert balance(client, headers)["universal_interviews"] == 3
++    data(client.post(f"/api/v1/interviews/{text['id']}/start", headers=headers))
++    data(
++        client.post(
++            f"/api/v1/interviews/{text['id']}/cancel",
++            headers={**headers, "Idempotency-Key": "cancel-started"},
++        )
++    )
++    assert balance(client, headers)["interview_credits"]["TEXT"] == 0
++    assert balance(client, headers)["universal_interviews"] == 3
++
++
++def test_refund_cannot_use_other_modes_or_universal_balance_to_cover_consumed_type(client):
++    headers, uid = login(client)
++    order = buy(client, headers)
++    row = interview(client, headers, config={"mode": "VIDEO"})
++    data(client.post(f"/api/v1/interviews/{row['id']}/start", headers=headers))
++    response = client.post(
++        f"/api/v1/billing/orders/{order['id']}/refund", headers={**headers, "Idempotency-Key": "used-refund"}
++    )
++    assert response.status_code == 409
++    assert balance(client, headers)["interview_credits"] == {"TEXT": 3, "VOICE": 2, "VIDEO": 0}
++    assert balance(client, headers)["universal_interviews"] == 3
++    with client.app.state.runtime.db.session() as db:
++        assert db.get(Order, order["id"]).status == "PAID"
++        assert db.scalar(select(Usage.id).where(Usage.user_id == uid, Usage.usage_type == "REFUND")) is None
++
++
++def test_admin_can_publish_bundle_and_grant_a_specific_mode(client):
++    headers, uid = typed_user(client)
++    admin, _ = admin_login(client)
++    payload = {
++        "code": "CUSTOM_BUNDLE",
++        "name": "组合训练",
++        "kind": "PACK",
++        "amount_minor": 3000,
++        "original_minor": 4000,
++        "interview_credits": BUNDLE,
++        "validity_days": 30,
++        "reason": "发布文字语音视频组合套餐",
++    }
++    for invalid in ({"TEXT": 0, "VOICE": 0, "VIDEO": 0}, {"TEXT": -1, "VOICE": 2, "VIDEO": 1}):
++        assert (
++            client.post(
++                "/api/v1/admin/products", headers=admin, json={**payload, "interview_credits": invalid}
++            ).status_code
++            == 422
++        )
++    product = data(client.post("/api/v1/admin/products", headers=admin, json=payload))
++    assert product["credits"] == 6 and product["interview_credits"] == BUNDLE
++    data(
++        client.post(
++            f"/api/v1/admin/products/{product['id']}/publish",
++            headers=admin,
++            json={"reason": "立即发布分类权益商品"},
++        )
++    )
++    order = buy(client, headers, "CUSTOM_BUNDLE")
++    # A new version with the same total cannot change an already-created order's split.
++    next_payload = {**payload, "interview_credits": {"TEXT": 5, "VOICE": 0, "VIDEO": 1}}
++    next_product = data(
++        client.post("/api/v1/admin/products", headers={**admin, "Idempotency-Key": "v2"}, json=next_payload)
++    )
++    data(
++        client.post(
++            f"/api/v1/admin/products/{next_product['id']}/publish",
++            headers={**admin, "Idempotency-Key": "publish-v2"},
++            json={"reason": "发布新的次数组合版本"},
++        )
++    )
++    assert (
++        data(client.get(f"/api/v1/billing/orders/{order['id']}", headers=headers))["interview_credits"]
++        == BUNDLE
++    )
++    grant = {"mode": "VOICE", "quantity": 2, "reason": "补发语音服务异常次数"}
++    for _ in range(2):
++        data(client.post(f"/api/v1/admin/users/{uid}/entitlements", headers=admin, json=grant))
++    assert balance(client, headers)["interview_credits"] == {"TEXT": 3, "VOICE": 4, "VIDEO": 1}
++    assert balance(client, headers)["universal_interviews"] == 0
++    detail = data(client.get(f"/api/v1/admin/users/{uid}", headers=admin))
++    assert detail["interview_credits"]["VOICE"] == 4
++    with client.app.state.runtime.db.session() as db:
++        assert db.scalar(
++            select(CreditAllocation.id)
++            .join(Usage, CreditAllocation.usage_id == Usage.id)
++            .where(Usage.user_id == uid, Usage.usage_type == "ADMIN_GRANT", CreditAllocation.mode == "VOICE")
++        )
+--- a/docs/sql/ai_interview_mysql.sql
++++ b/docs/sql/ai_interview_mysql.sql
+@@ -1,5 +1,5 @@
+ -- AI 模拟面试服务：MySQL 8.4 全新建库 SQL（含中文表注释和全部字段注释）
+--- 当前结构对应 Alembic 版本 a61d8c4e9201，包含 29 张业务表和 1 张迁移版本表。
++-- 当前结构对应 Alembic 版本 b72e4f6d9102，包含 31 张业务表和 1 张迁移版本表。
+ -- 仅在空数据库中执行；已有数据库请使用 alembic upgrade head；不要直接执行本建库 SQL。
+ -- 不包含业务数据或凭证；ID、状态及时间等 ORM 客户端默认值由应用写入。
+ -- 示例：mysql --default-character-set=utf8mb4 -h 127.0.0.1 -u root AI_Interview < docs/sql/ai_interview_mysql.sql
+@@ -163,6 +163,19 @@
+     UNIQUE (user_id, scope, `key`),
+     FOREIGN KEY(user_id) REFERENCES users (id)
+ )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='关键写操作的幂等键、请求摘要及原始响应快照' COLLATE utf8mb4_0900_bin;
++
++CREATE TABLE interview_credit_balances (
++    id VARCHAR(36) NOT NULL COMMENT '分类权益余额记录 ID（UUID）',
++    user_id VARCHAR(36) NOT NULL COMMENT '权益所属用户 ID，关联 users.id',
++    mode VARCHAR(16) NOT NULL COMMENT '面试类型：TEXT=文字、VOICE=语音、VIDEO=视频',
++    remaining INTEGER NOT NULL COMMENT '该类型可用次数，单位次；不含已预占次数和历史通用次数' DEFAULT '0',
++    created_at DATETIME(6) NOT NULL COMMENT '创建时间（UTC）',
++    updated_at DATETIME(6) NOT NULL COMMENT '最后变更时间（UTC）',
++    PRIMARY KEY (id),
++    CONSTRAINT uq_credit_balance_user_mode UNIQUE (user_id, mode),
++    CONSTRAINT ck_credit_balance_nonnegative CHECK (remaining >= 0),
++    FOREIGN KEY(user_id) REFERENCES users (id)
++)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='按文字、语音、视频分别管理可用面试次数；旧通用次数继续存储于 users.credits' COLLATE utf8mb4_0900_bin;
+ 
+ CREATE TABLE job_profiles (
+     user_id VARCHAR(36) NOT NULL COMMENT '所属用户 ID，关联 users.id，用于数据归属校验',
+@@ -242,6 +255,7 @@
+     status VARCHAR(24) NOT NULL COMMENT '状态：DRAFT/IN_REVIEW/PUBLISHED/RETIRED',
+     created_by VARCHAR(36) NOT NULL COMMENT '创建管理员 ID',
+     published_at DATETIME(6) COMMENT '发布时间（UTC）',
++    interview_credits JSON COMMENT '按面试类型发放的次数：TEXT=文字、VOICE=语音、VIDEO=视频；NULL=历史通用次数套餐',
+     PRIMARY KEY (id),
+     CONSTRAINT uq_product_sku_version UNIQUE (code, version),
+     FOREIGN KEY(created_by) REFERENCES admin_users (id)
+@@ -546,6 +560,18 @@
+ 
+ CREATE INDEX ix_resume_assets_user_id ON resume_assets (user_id);
+ 
++CREATE TABLE usage_credit_allocations (
++    id VARCHAR(36) NOT NULL COMMENT '权益流水分类明细 ID（UUID）',
++    usage_id VARCHAR(36) NOT NULL COMMENT '权益流水 ID，关联 usage_ledger.id',
++    mode VARCHAR(16) NOT NULL COMMENT '次数来源：TEXT/VOICE/VIDEO=对应类型；UNIVERSAL=历史通用次数',
++    quantity INTEGER NOT NULL COMMENT '该类型次数变化，单位次；发放为正、预占或退款为负；释放按原来源返还',
++    created_at DATETIME(6) NOT NULL COMMENT '创建时间（UTC）',
++    updated_at DATETIME(6) NOT NULL COMMENT '最后变更时间（UTC）',
++    PRIMARY KEY (id),
++    CONSTRAINT uq_usage_credit_mode UNIQUE (usage_id, mode),
++    FOREIGN KEY(usage_id) REFERENCES usage_ledger (id)
++)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='权益流水的类型分配明细，保证取消、重试及退款使用原始类型；历史无明细流水视为通用次数' COLLATE utf8mb4_0900_bin;
++
+ ALTER TABLE interviews ADD CONSTRAINT fk_interview_resume FOREIGN KEY(resume_asset_id) REFERENCES resume_assets (id);
+ 
+ ALTER TABLE media_assets ADD CONSTRAINT fk_media_turn FOREIGN KEY(turn_id) REFERENCES interview_turns (id);
+@@ -554,4 +580,4 @@
+ 
+ ALTER TABLE interview_turns ADD CONSTRAINT fk_turn_tts FOREIGN KEY(question_asset_id) REFERENCES media_assets (id);
+ 
+-INSERT INTO alembic_version (version_num) VALUES ('a61d8c4e9201');
++INSERT INTO alembic_version (version_num) VALUES ('b72e4f6d9102');
+--- /dev/null
++++ b/docs/sql/update_typed_interview_credits_mysql.sql
+@@ -0,0 +1,33 @@
++-- 文字/语音/视频分类权益增量迁移；保留现有 users.credits 作为通用次数。
++-- 适用于 a61d8c4e9201；与 alembic upgrade head 二选一。
++-- Running upgrade a61d8c4e9201 -> b72e4f6d9102
++
++CREATE TABLE interview_credit_balances (
++    id VARCHAR(36) NOT NULL COMMENT '分类权益余额记录 ID（UUID）', 
++    user_id VARCHAR(36) NOT NULL COMMENT '权益所属用户 ID，关联 users.id', 
++    mode VARCHAR(16) NOT NULL COMMENT '面试类型：TEXT=文字、VOICE=语音、VIDEO=视频', 
++    remaining INTEGER NOT NULL COMMENT '该类型可用次数，单位次；不含已预占次数和历史通用次数' DEFAULT '0', 
++    created_at DATETIME(6) NOT NULL COMMENT '创建时间（UTC）', 
++    updated_at DATETIME(6) NOT NULL COMMENT '最后变更时间（UTC）', 
++    PRIMARY KEY (id), 
++    CONSTRAINT uq_credit_balance_user_mode UNIQUE (user_id, mode), 
++    CONSTRAINT ck_credit_balance_nonnegative CHECK (remaining >= 0), 
++    FOREIGN KEY(user_id) REFERENCES users (id)
++)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='按文字、语音、视频分别管理可用面试次数；旧通用次数继续存储于 users.credits' COLLATE utf8mb4_0900_bin;
++
++CREATE TABLE usage_credit_allocations (
++    id VARCHAR(36) NOT NULL COMMENT '权益流水分类明细 ID（UUID）', 
++    usage_id VARCHAR(36) NOT NULL COMMENT '权益流水 ID，关联 usage_ledger.id', 
++    mode VARCHAR(16) NOT NULL COMMENT '次数来源：TEXT/VOICE/VIDEO=对应类型；UNIVERSAL=历史通用次数', 
++    quantity INTEGER NOT NULL COMMENT '该类型次数变化，单位次；发放为正、预占或退款为负；释放按原来源返还', 
++    created_at DATETIME(6) NOT NULL COMMENT '创建时间（UTC）', 
++    updated_at DATETIME(6) NOT NULL COMMENT '最后变更时间（UTC）', 
++    PRIMARY KEY (id), 
++    CONSTRAINT uq_usage_credit_mode UNIQUE (usage_id, mode), 
++    FOREIGN KEY(usage_id) REFERENCES usage_ledger (id)
++)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='权益流水的类型分配明细，保证取消、重试及退款使用原始类型；历史无明细流水视为通用次数' COLLATE utf8mb4_0900_bin;
++
++ALTER TABLE product_skus ADD COLUMN interview_credits JSON COMMENT '按面试类型发放的次数：TEXT=文字、VOICE=语音、VIDEO=视频；NULL=历史通用次数套餐';
++
++UPDATE alembic_version SET version_num='b72e4f6d9102' WHERE alembic_version.version_num = 'a61d8c4e9201';
++
+--- /dev/null
++++ b/docs/typed-entitlements.md
+@@ -0,0 +1,26 @@
++# 分类面试权益
++
++套餐通过 `interview_credits` 配置文字（TEXT）、语音（VOICE）、视频（VIDEO）次数。例如：
++
++```json
++{"TEXT": 3, "VOICE": 2, "VIDEO": 1}
++```
++
++管理后台创建商品提交上述对象，服务端计算 `credits=6`。各类型允许为 0，合计须为 1 至 10000；若同时传入 `credits`，必须等于分类次数之和。商品按现有版本发布，发布新版本仅影响之后创建的订单。默认 STARTER 体验包包含 3 次文字、2 次语音、1 次视频。
++
++`GET /billing/entitlements` 和用户信息提供：
++
++- `interview_credits`：各类型可用次数，不含已预占次数。
++- `universal_interviews`：保留的历史通用次数。
++- `remaining_interviews`：三类可用次数与通用次数之和。
++- 权益接口额外返回 `reserved_interviews` 和 `reserved_by_mode`：按所创建面试的类型统计预占。
++
++某类型可用额度为 `interview_credits[mode] + universal_interviews`，不能用其他类型余额替代。创建时先预占类型余额，再使用通用余额。开始面试将预占标为已消费；未开始取消或准备失败按原来源释放，重复操作不重复返还。准备任务重试会重新核对并预占对应类型。
++
++订单创建时在 `order_product_snapshots` 固化类型组合。支付按快照一次性发放，重复回调不重复增加。全额退款逐类型核验余额，不使用其他类型或通用余额补足缺失的分类余额；任何类型不足则整笔退款失败并回滚，不修改订单状态或其他类型余额。
++
++管理员补发接口 `/admin/users/{id}/entitlements` 支持 `mode=TEXT/VOICE/VIDEO/UNIVERSAL` 与 `quantity`。旧客户端未指定 mode 时仍补发通用次数。权益流水通过 `credit_allocations` 返回类型明细，历史无分类流水按通用解释。
++
++历史兼容：保留 `users.credits` 和旧订单的通用语义，不自动转换已有余额、已预占流水、历史商品或历史订单。旧商品的 `interview_credits=null`，新建版本时可明确设置组合。账户删除会清零三类余额。
++
++迁移：`alembic upgrade head`（版本 `b72e4f6d9102`）。迁移增加两张带中文注释的表与商品 JSON 列，不改历史余额。全量建库 SQL 与 `docs/sql/update_typed_interview_credits_mysql.sql` 已同步；增量 SQL 与 Alembic 二选一。当前仍一次性发放次数，不执行到期回收或周期重置。
+--- /dev/null
++++ b/alembic/versions/b72e4f6d9102_typed_interview_credits.py
+@@ -0,0 +1,54 @@
++"""Separate TEXT/VOICE/VIDEO entitlements while preserving historical universal credits.
++
++Revision ID: b72e4f6d9102
++Revises: a61d8c4e9201
++"""
++
++import sqlalchemy as sa
++
++from alembic import op
++from app.db.entitlement_schema_v1 import define_tables, product_credits_column
++
++revision = "b72e4f6d9102"
++down_revision = "a61d8c4e9201"
++branch_labels = None
++depends_on = None
++
++
++def upgrade():
++    metadata = sa.MetaData()
++    for name in ("users", "usage_ledger"):
++        sa.Table(name, metadata, sa.Column("id", sa.String(36), primary_key=True))
++    for table in define_tables(metadata):
++        op.create_table(
++            table.name,
++            *[column._copy() for column in table.columns],
++            *[
++                sa.UniqueConstraint(*[column.name for column in constraint.columns], name=constraint.name)
++                for constraint in list(table.constraints)
++                if isinstance(constraint, sa.UniqueConstraint)
++            ],
++            *[
++                sa.CheckConstraint(str(constraint.sqltext), name=constraint.name)
++                for constraint in list(table.constraints)
++                if isinstance(constraint, sa.CheckConstraint)
++            ],
++            *[
++                sa.ForeignKeyConstraint(
++                    [column.name for column in constraint.columns],
++                    [element.target_fullname for element in constraint.elements],
++                    name=constraint.name,
++                )
++                for constraint in list(table.constraints)
++                if isinstance(constraint, sa.ForeignKeyConstraint)
++            ],
++            comment=table.comment,
++            **dict(table.kwargs),
++        )
++    op.add_column("product_skus", product_credits_column())
++
++
++def downgrade():
++    op.drop_column("product_skus", "interview_credits")
++    op.drop_table("usage_credit_allocations")
++    op.drop_table("interview_credit_balances")
+--- a/README.md
++++ b/README.md
+@@ -117,3 +117,5 @@
+ ## 运营管理后台
+ 
+ 新增独立管理员登录、RBAC、单人直接操作、审计、运营指标、用户与面试审阅、商品版本、财务对账等接口。启动、迁移与当前边界见 [后台运行说明](docs/admin-console.md)。
++
++分类面试权益的套餐配置、类型余额、历史通用次数兼容和迁移说明见 [分类面试权益](docs/typed-entitlements.md)。

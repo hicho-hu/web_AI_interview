@@ -1,0 +1,3468 @@
+diff --git a/.env.example b/.env.example
+--- a/.env.example
++++ b/.env.example
+@@ -4,6 +4,16 @@
+ TASK_MODE=worker
+ STORAGE_BACKEND=local
+ STORAGE_PATH=var/objects
++# 阿里云 OSS：长期密钥只允许放在后端 .env，角色必须具有 Bucket 的对象权限。
++# STORAGE_BACKEND=oss
++ALIYUN_ACCESS_KEY_ID=
++ALIYUN_ACCESS_KEY_SECRET=
++ALIYUN_RAM_ROLE_ARN=
++OSS_BUCKET_NAME=ai-interview-storage
++OSS_ENDPOINT=https://oss-cn-hangzhou.aliyuncs.com
++OSS_REGION=cn-hangzhou
++OSS_STS_ENDPOINT=sts.cn-hangzhou.aliyuncs.com
++OSS_STS_DURATION_SECONDS=3600
+ # 系统 PATH 中的 FFmpeg/FFprobe；本机独立安装时可改为可执行文件的绝对路径。
+ FFMPEG_BIN=ffmpeg
+ FFPROBE_BIN=ffprobe
+@@ -44,3 +54,14 @@
+ REALTIME_ASR_MODEL=qwen3-asr-flash-realtime
+ # 可留空，根据已有 DashScope WebSocket / Compatible 地址推导同地域地址。
+ REALTIME_ASR_URL=
++
++# 邮箱注册：开发 preview 明确展示本地验证码，不发送真实邮件；生产必须 smtp。
++MAIL_MODE=preview
++WEB_BASE_URL=http://127.0.0.1:5173
++SMTP_HOST=
++SMTP_PORT=587
++SMTP_USERNAME=
++SMTP_PASSWORD=
++SMTP_FROM=
++SMTP_USE_SSL=false
++SMTP_STARTTLS=true
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -59,7 +59,7 @@
+ 
+ |业务域|能力|
+ |---|---|
+-|用户|微信 code 换码、JWT、退出撤销、用户资料、版本化授权与撤销、个人数据查询/异步删除|
++|用户|邮箱验证码注册、邮箱密码登录、改密与邮箱换绑、头像昵称、JWT 会话撤销、版本化授权与撤销、个人数据查询/异步删除|
+ |岗位/简历|JD 录入/结构化、级别、岗位管理；PDF/DOCX 私有上传/文字提取/结构化，计划结合简历事实|
+ |面试|TEXT/VOICE/VIDEO；15/30/45 分钟、难度/语言/题数/类型；计划、首题、暂停/恢复/取消、超时/题数结束|
+ |动态问答|独立引擎；FOLLOW_UP/NEXT_QUESTION/CLARIFY/FINISH；追问/澄清上限、能力覆盖、最近轮次摘要|
+@@ -119,3 +119,9 @@
+ 新增独立管理员登录、RBAC、单人直接操作、审计、运营指标、用户与面试审阅、商品版本、财务对账等接口。启动、迁移与当前边界见 [后台运行说明](docs/admin-console.md)。
+ 
+ 分类面试权益的套餐配置、类型余额、历史通用次数兼容和迁移说明见 [分类面试权益](docs/typed-entitlements.md)。
++
++邮箱注册、邀请奖励与分佣推广已接入，配置和接口见 [邮箱账号与推广](docs/accounts-growth.md)。当前 Web 使用邮箱注册/密码登录；手机号与网页第三方登录暂缓。开发邮件默认预览验证码，正式部署需配置 SMTP。
++
++## 阿里云 OSS
++
++支持 `STORAGE_BACKEND=oss`，通过服务端 STS 按当前用户的单个待上传资产授权；Web 大文件分片上传，后端校验并复制到不可由上传凭证覆盖的 accepted 路径。角色策略、CORS、回放和切换步骤见 [OSS 接入](docs/oss-storage.md)。切换前可在保持本地存储时运行 `python -B scripts/check_oss.py --write-probe`，或在管理后台“系统管理 → 文件存储”检查连接。
+diff --git a/alembic/versions/c83f5a7e0203_accounts_growth.py b/alembic/versions/c83f5a7e0203_accounts_growth.py
+new file mode 100644
+--- /dev/null
++++ b/alembic/versions/c83f5a7e0203_accounts_growth.py
+@@ -0,0 +1,53 @@
++"""Verified email accounts, invitation rewards and promotion commissions.
++Revision ID: c83f5a7e0203
++Revises: b72e4f6d9102
++"""
++
++import sqlalchemy as sa
++
++from alembic import op
++from app.db.growth_schema_v1 import define_tables
++
++revision = "c83f5a7e0203"
++down_revision = "b72e4f6d9102"
++branch_labels = None
++depends_on = None
++
++
++def schema():
++    metadata = sa.MetaData()
++    for name in ("users", "media_assets", "usage_ledger", "admin_users", "orders"):
++        sa.Table(name, metadata, sa.Column("id", sa.String(36), primary_key=True))
++    names = {table.name for table in define_tables(metadata)}
++    return [table for table in metadata.sorted_tables if table.name in names]
++
++
++def upgrade():
++    for table in schema():
++        op.create_table(
++            table.name,
++            *[column._copy() for column in table.columns],
++            *[
++                sa.UniqueConstraint(*[column.name for column in constraint.columns], name=constraint.name)
++                for constraint in list(table.constraints)
++                if isinstance(constraint, sa.UniqueConstraint)
++            ],
++            *[
++                sa.ForeignKeyConstraint(
++                    [column.name for column in constraint.columns],
++                    [element.target_fullname for element in constraint.elements],
++                    name=constraint.name,
++                )
++                for constraint in list(table.constraints)
++                if isinstance(constraint, sa.ForeignKeyConstraint)
++            ],
++            comment=table.comment,
++            **dict(table.kwargs),
++        )
++        for index in table.indexes:
++            op.create_index(index.name, table.name, [column.name for column in index.columns])
++
++
++def downgrade():
++    for table in reversed(schema()):
++        op.drop_table(table.name)
+diff --git a/app/api/accounts.py b/app/api/accounts.py
+new file mode 100644
+--- /dev/null
++++ b/app/api/accounts.py
+@@ -0,0 +1,87 @@
++from fastapi import APIRouter, Depends, Request
++
++from app.api.dependencies import current_user, db_session, ok, service
++from app.modules.accounts.service import AccountService
++from app.schemas import accounts as schema
++from app.schemas.contracts import Envelope
++
++router = APIRouter(tags=["邮箱账号与资料"])
++
++
++def ip(request):
++    return request.client.host if request.client else "local"
++
++
++@router.post("/auth/email-code", response_model=Envelope)
++def email_code(data: schema.EmailCodeInput, request: Request, db=Depends(db_session, scope="function")):
++    return ok(
++        request,
++        AccountService(request.app.state.runtime, db).send_code(data.email, data.purpose, ip(request)),
++    )
++
++
++@router.post("/auth/email-register", response_model=Envelope, status_code=201)
++def register(data: schema.EmailRegister, request: Request, db=Depends(db_session, scope="function")):
++    return ok(request, AccountService(request.app.state.runtime, db).register(data))
++
++
++@router.post("/auth/email-login", response_model=Envelope)
++def login(data: schema.EmailLogin, request: Request, db=Depends(db_session, scope="function")):
++    return ok(request, AccountService(request.app.state.runtime, db).login(data, ip(request)))
++
++
++@router.post("/auth/password-reset", response_model=Envelope)
++def reset(data: schema.PasswordReset, request: Request, db=Depends(db_session, scope="function")):
++    return ok(request, AccountService(request.app.state.runtime, db).reset_password(data))
++
++
++@router.post("/users/me/email-code", response_model=Envelope)
++def binding_code(
++    data: schema.EmailInput,
++    request: Request,
++    db=Depends(db_session, scope="function"),
++    user=Depends(current_user),
++):
++    return ok(
++        request, service(AccountService, request, db, user).send_code(data.email, "BIND_EMAIL", ip(request))
++    )
++
++
++@router.post("/users/me/email", response_model=Envelope)
++def bind(
++    data: schema.EmailBinding,
++    request: Request,
++    db=Depends(db_session, scope="function"),
++    user=Depends(current_user),
++):
++    return ok(request, service(AccountService, request, db, user).bind_email(data))
++
++
++@router.post("/users/me/password", response_model=Envelope)
++def password(
++    data: schema.PasswordChange,
++    request: Request,
++    db=Depends(db_session, scope="function"),
++    user=Depends(current_user),
++):
++    return ok(request, service(AccountService, request, db, user).change_password(data))
++
++
++@router.patch("/users/me/avatar", response_model=Envelope)
++def avatar(
++    data: schema.AvatarInput,
++    request: Request,
++    db=Depends(db_session, scope="function"),
++    user=Depends(current_user),
++):
++    return ok(request, service(AccountService, request, db, user).avatar(data.asset_id))
++
++
++@router.patch("/users/me/contact", response_model=Envelope)
++def contact(
++    data: schema.ContactInput,
++    request: Request,
++    db=Depends(db_session, scope="function"),
++    user=Depends(current_user),
++):
++    return ok(request, service(AccountService, request, db, user).contact(data.phone.strip()))
+diff --git a/app/api/admin.py b/app/api/admin.py
+--- a/app/api/admin.py
++++ b/app/api/admin.py
+@@ -28,6 +28,7 @@
+     AdminService,
+ )
+ from app.modules.billing.service import BillingService
++from app.modules.media.storage_status import storage_status
+ from app.schemas import admin as schema
+ from app.schemas.contracts import Envelope
+ 
+@@ -61,6 +62,11 @@
+     return AdminService(request.app.state.runtime, db, admin, request)
+ 
+ 
++@router.get("/storage/status", response_model=Envelope, dependencies=[Depends(access("system:read"))])
++def storage_configuration(request: Request, probe: bool = False):
++    return ok(request, storage_status(request.app.state.runtime, probe))
++
++
+ def sensitive_review(service, resource_id, operation):
+     try:
+         return operation()
+diff --git a/app/api/growth.py b/app/api/growth.py
+new file mode 100644
+--- /dev/null
++++ b/app/api/growth.py
+@@ -0,0 +1,91 @@
++from fastapi import APIRouter, Depends, Header, Query, Request
++
++from app.api.admin import access, svc
++from app.api.dependencies import current_user, db_session, ok, service
++from app.modules.growth.service import GrowthService
++from app.schemas import growth as schema
++from app.schemas.contracts import Envelope
++
++router = APIRouter(tags=["邀请与推广"])
++
++
++@router.get("/invitations/me", response_model=Envelope)
++def invitation(request: Request, db=Depends(db_session, scope="function"), user=Depends(current_user)):
++    return ok(request, service(GrowthService, request, db, user).invitation_view())
++
++
++@router.get(
++    "/admin/invitations/config", response_model=Envelope, dependencies=[Depends(access("growth:read"))]
++)
++def invitation_config(request: Request, admin=Depends(svc)):
++    return ok(request, GrowthService(admin.rt, admin.db).config())
++
++
++@router.put(
++    "/admin/invitations/config", response_model=Envelope, dependencies=[Depends(access("growth:write"))]
++)
++def update_config(
++    data: schema.InvitationConfigInput,
++    request: Request,
++    idempotency_key: str = Header(...),
++    admin=Depends(svc),
++):
++    def change():
++        result = GrowthService(admin.rt, admin.db).configure(data, admin.admin.id)
++        admin.audit("INVITATION_CONFIG_UPDATED", result["id"], data.reason)
++        return result
++
++    return ok(request, admin.idem("invitation:config", idempotency_key, data.model_dump(), change))
++
++
++@router.get("/admin/promotions", response_model=Envelope, dependencies=[Depends(access("growth:read"))])
++def promotions(
++    request: Request, page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100), admin=Depends(svc)
++):
++    return ok(request, GrowthService(admin.rt, admin.db).promotions(page, page_size))
++
++
++@router.post(
++    "/admin/promotions",
++    response_model=Envelope,
++    status_code=201,
++    dependencies=[Depends(access("growth:write"))],
++)
++def create_promotion(
++    data: schema.PromotionInput, request: Request, idempotency_key: str = Header(...), admin=Depends(svc)
++):
++    def change():
++        result = GrowthService(admin.rt, admin.db).promotion(data, admin.admin.id)
++        admin.audit("PROMOTION_CREATED", result["id"], data.reason)
++        return result
++
++    return ok(request, admin.idem("promotion:create", idempotency_key, data.model_dump(), change))
++
++
++@router.put(
++    "/admin/promotions/{link_id}", response_model=Envelope, dependencies=[Depends(access("growth:write"))]
++)
++def update_promotion(
++    link_id: str,
++    data: schema.PromotionInput,
++    request: Request,
++    idempotency_key: str = Header(...),
++    admin=Depends(svc),
++):
++    def change():
++        result = GrowthService(admin.rt, admin.db).promotion(data, admin.admin.id, link_id)
++        admin.audit("PROMOTION_UPDATED", result["id"], data.reason)
++        return result
++
++    return ok(request, admin.idem("promotion:update:" + link_id, idempotency_key, data.model_dump(), change))
++
++
++@router.get(
++    "/admin/promotions/commissions/records",
++    response_model=Envelope,
++    dependencies=[Depends(access("growth:read"))],
++)
++def commissions(
++    request: Request, page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100), admin=Depends(svc)
++):
++    return ok(request, GrowthService(admin.rt, admin.db).commissions(page, page_size))
+diff --git a/app/api/media.py b/app/api/media.py
+--- a/app/api/media.py
++++ b/app/api/media.py
+@@ -78,7 +78,7 @@
+ def signed_asset(request, db, asset_id, purpose, expires, signature):
+     rt = request.app.state.runtime
+     require(
+-        rt.settings.storage_backend == "local" and rt.settings.environment != "production",
++        rt.settings.storage_backend in ("local", "oss") and rt.settings.environment != "production",
+         "RESOURCE_NOT_FOUND",
+         "不存在",
+         404,
+@@ -92,6 +92,12 @@
+     )
+     asset = db.get(MediaAsset, asset_id)
+     require(asset and aware(asset.expires_at) > utcnow(), "MEDIA_EXPIRED", "媒体不存在或已过期", 410)
++    require(
++        not (rt.settings.storage_backend == "oss" and asset.object_key.startswith("ai-interview/user/")),
++        "RESOURCE_NOT_FOUND",
++        "不存在",
++        404,
++    )
+     return rt, asset
+ 
+ 
+@@ -122,7 +128,8 @@
+         content.extend(part)
+         require(len(content) <= asset.size_bytes, "MEDIA_TOO_LARGE", "上传数据超过声明大小", 413)
+     require(len(content) == asset.size_bytes, "MEDIA_SIZE_MISMATCH", "上传数据大小不一致")
+-    rt.storage.put(asset.object_key, bytes(content), asset.mime_type)
++    target = getattr(rt.storage, "legacy", rt.storage)
++    target.put(asset.object_key, bytes(content), asset.mime_type)
+     return ok(request, {"uploaded": True})
+ 
+ 
+diff --git a/app/api/v1/__init__.py b/app/api/v1/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/app/api/v1/storage.py b/app/api/v1/storage.py
+new file mode 100644
+--- /dev/null
++++ b/app/api/v1/storage.py
+@@ -0,0 +1,41 @@
++from fastapi import APIRouter, Depends, Query, Request, Response
++
++from app.api.dependencies import current_user, db_session, ok
++from app.core.errors import require
++from app.core.security import utcnow
++from app.db.models import MediaAsset
++from app.db.repository import owned
++from app.infrastructure.storage.sts_service import generate_sts_token
++from app.modules.identity.service import IdentityService
++from app.modules.media.service import aware
++from app.schemas.contracts import Envelope
++
++router = APIRouter(prefix="/storage", tags=["文件存储"])
++
++
++@router.get("/sts-token", response_model=Envelope)
++def sts_token(
++    request: Request,
++    response: Response,
++    asset_id: str = Query(..., min_length=1, max_length=36),
++    db=Depends(db_session, scope="function"),
++    user=Depends(current_user),
++):
++    rt = request.app.state.runtime
++    require(rt.settings.storage_backend == "oss", "OSS_NOT_CONFIGURED", "当前服务未启用 OSS 上传", 503)
++    asset = owned(db, MediaAsset, asset_id, user.id)
++    require(
++        asset.status == "PENDING_UPLOAD" and aware(asset.expires_at) > utcnow(),
++        "MEDIA_INVALID_STATE",
++        "文件上传凭证已完成或过期",
++        409,
++    )
++    identity = IdentityService(rt, db, user.id)
++    identity.require_consents("PRIVACY", "TERMS")
++    if asset.media_type in ("AUDIO", "VIDEO", "SESSION_AUDIO", "SESSION_VIDEO"):
++        identity.require_consents(
++            "MICROPHONE", *(["CAMERA"] if asset.media_type in ("VIDEO", "SESSION_VIDEO") else [])
++        )
++    response.headers["Cache-Control"] = "private, no-store"
++    response.headers["Pragma"] = "no-cache"
++    return ok(request, {"asset_id": asset.id, **generate_sts_token(user.id, asset.object_key, rt)})
+diff --git a/app/core/config.py b/app/core/config.py
+--- a/app/core/config.py
++++ b/app/core/config.py
+@@ -6,12 +6,12 @@
+ 
+ 
+ class Settings(BaseSettings):
+-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
++    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
+     environment: Literal["development", "test", "production"] = "development"
+     database_url: str = "mysql+pymysql://interview:interview-local@127.0.0.1:3306/interview?charset=utf8mb4"
+     redis_url: Optional[str] = "redis://127.0.0.1:6379/0"
+     task_mode: Literal["eager", "worker"] = "worker"
+-    storage_backend: Literal["local", "s3"] = "local"
++    storage_backend: Literal["local", "s3", "oss"] = "local"
+     storage_path: Path = Path("var/objects")
+     public_base_url: str = "http://localhost:8000"
+     secret_key: str = "development-only-change-this-secret-32-chars"
+@@ -45,8 +45,25 @@
+     provider_retry_count: int = Field(2, ge=0, le=3)
+     provider_cost_limit_microunits: int = Field(2_000_000, ge=1)
+     global_daily_cost_limit_microunits: int = Field(100_000_000, ge=1)
++    mail_mode: Literal["smtp", "preview", "disabled"] = "preview"
++    smtp_host: str = ""
++    smtp_port: int = Field(587, ge=1, le=65535)
++    smtp_username: str = ""
++    smtp_password: str = ""
++    smtp_from: str = ""
++    smtp_use_ssl: bool = False
++    smtp_starttls: bool = True
++    web_base_url: str = "http://127.0.0.1:5173"
+     wechat_app_id: str = ""
+     wechat_app_secret: str = ""
++    aliyun_access_key_id: str = Field("", repr=False)
++    aliyun_access_key_secret: str = Field("", repr=False)
++    aliyun_ram_role_arn: str = ""
++    oss_bucket_name: str = "ai-interview-storage"
++    oss_endpoint: str = "https://oss-cn-hangzhou.aliyuncs.com"
++    oss_region: str = "cn-hangzhou"
++    oss_sts_endpoint: str = "sts.cn-hangzhou.aliyuncs.com"
++    oss_sts_duration_seconds: int = Field(3600, ge=900, le=3600)
+     s3_endpoint_url: Optional[str] = None
+     s3_public_endpoint_url: Optional[str] = None
+     s3_bucket: str = "ai-interview"
+@@ -65,6 +82,16 @@
+ 
+     @model_validator(mode="after")
+     def production_guards(self):
++        if self.storage_backend == "oss" and not (
++            self.aliyun_access_key_id
++            and self.aliyun_access_key_secret
++            and self.aliyun_ram_role_arn.startswith("acs:ram::")
++            and ":role/" in self.aliyun_ram_role_arn
++            and self.oss_bucket_name
++            and self.oss_endpoint.startswith("https://")
++            and self.oss_sts_endpoint.endswith(".aliyuncs.com")
++        ):
++            raise ValueError("OSS 必须配置后端 RAM 密钥、角色 ARN、Bucket 和 HTTPS Endpoint")
+         if self.realtime_asr_url and not self.realtime_asr_url.startswith("wss://"):
+             raise ValueError("实时转写必须使用 WSS 地址")
+         if self.asr_provider == "qwen" and (
+@@ -85,17 +112,22 @@
+             required = (
+                 self.database_url.startswith("mysql+pymysql://"),
+                 self.redis_url,
+-                self.storage_backend == "s3",
++                self.storage_backend in ("s3", "oss"),
+                 self.task_mode == "worker",
+                 self.provider_mode in ("http", "compatible"),
+                 self.provider_url.startswith("https://"),
+                 self.provider_api_key,
+                 self.encryption_key,
+                 len(self.secret_key) >= 32 and not self.secret_key.startswith("development"),
+-                self.wechat_app_id,
+-                self.wechat_app_secret,
++                self.mail_mode == "smtp",
++                self.smtp_host,
++                self.smtp_from,
++                self.smtp_use_ssl or self.smtp_starttls,
++                self.web_base_url.startswith("https://"),
+                 self.public_base_url.startswith("https://"),
+             )
+             if not all(required):
+-                raise ValueError("生产环境必须配置 MySQL/Redis/S3/Worker/真实 Provider/微信/HTTPS/独立密钥")
++                raise ValueError(
++                    "生产环境必须配置 MySQL/Redis/私有对象存储/Worker/真实 Provider/SMTP/HTTPS/独立密钥"
++                )
+         return self
+diff --git a/app/core/security.py b/app/core/security.py
+--- a/app/core/security.py
++++ b/app/core/security.py
+@@ -38,9 +38,16 @@
+     def identity_hash(self, identity: str):
+         return hmac.new(self.settings.secret_key.encode(), identity.encode(), hashlib.sha256).hexdigest()
+ 
+-    def token(self, user_id: str):
++    def token(self, user_id: str, auth_version: int = 0):
+         expires = utcnow() + timedelta(minutes=self.settings.access_token_minutes)
+-        claims = {"sub": user_id, "jti": new_id(), "exp": expires, "iat": utcnow(), "aud": "ai-interview"}
++        claims = {
++            "sub": user_id,
++            "jti": new_id(),
++            "exp": expires,
++            "iat": utcnow(),
++            "aud": "ai-interview",
++            "ver": auth_version,
++        }
+         return jwt.encode(claims, self.settings.secret_key, algorithm="HS256")
+ 
+     def decode(self, token: str):
+diff --git a/app/db/growth_models.py b/app/db/growth_models.py
+new file mode 100644
+--- /dev/null
++++ b/app/db/growth_models.py
+@@ -0,0 +1,23 @@
++"""Account and growth ORM mappings, separate from historical schema snapshots."""
++
++from sqlalchemy.orm import registry
++
++from app.db.growth_schema_v1 import define_tables
++from app.db.models import Base
++
++mapper_registry = registry()
++names = (
++    "UserAccount",
++    "EmailChallenge",
++    "InvitationCode",
++    "InvitationConfig",
++    "ReferralRegistration",
++    "InvitationReward",
++    "PromotionLink",
++    "PromotionAttribution",
++    "PromotionCommission",
++)
++for name, table in zip(names, define_tables(Base.metadata)):
++    cls = type(name, (), {})
++    mapper_registry.map_imperatively(cls, table)
++    globals()[name] = cls
+diff --git a/app/db/growth_schema_v1.py b/app/db/growth_schema_v1.py
+new file mode 100644
+--- /dev/null
++++ b/app/db/growth_schema_v1.py
+@@ -0,0 +1,149 @@
++"""Frozen account, invitation and promotion schema for revision c83f5a7e0203."""
++
++import sqlalchemy as sa
++
++from app.core.security import new_id, utcnow
++from app.db.types import MYSQL_TABLE_OPTIONS, LongText, UTCDateTime
++
++
++def define_tables(metadata):
++    names = []
++
++    def c(name, type_, meaning, **kwargs):
++        return sa.Column(name, type_, comment=meaning, nullable=kwargs.pop("nullable", False), **kwargs)
++
++    def ref(name, target, meaning, **kwargs):
++        return sa.Column(
++            name,
++            sa.String(36),
++            sa.ForeignKey(target),
++            comment=meaning,
++            nullable=kwargs.pop("nullable", False),
++            **kwargs,
++        )
++
++    def table(name, meaning, *columns):
++        names.append(name)
++        return sa.Table(
++            name,
++            metadata,
++            c("id", sa.String(36), "记录唯一标识（UUID）", primary_key=True, default=new_id),
++            c("created_at", UTCDateTime(), "创建时间（UTC）", default=utcnow),
++            c("updated_at", UTCDateTime(), "最后变更时间（UTC）", default=utcnow, onupdate=utcnow),
++            *columns,
++            comment=meaning,
++            **MYSQL_TABLE_OPTIONS,
++        )
++
++    table(
++        "user_accounts",
++        "用户邮箱账号、安全凭证与资料扩展；关联既有业务用户",
++        ref("user_id", "users.id", "用户 ID，关联 users.id", unique=True),
++        c(
++            "email_hash",
++            sa.String(64),
++            "规范化邮箱的 HMAC，唯一查找键；不保存明文邮箱",
++            nullable=True,
++            unique=True,
++        ),
++        c("email_encrypted", LongText, "加密的已验证邮箱地址", nullable=True),
++        c("password_hash", sa.String(256), "scrypt 密码散列，含随机盐；不保存明文密码", nullable=True),
++        c(
++            "auth_version",
++            sa.Integer,
++            "用户会话版本；改密和换绑后递增，使旧令牌失效",
++            default=0,
++            server_default="0",
++        ),
++        ref("avatar_asset_id", "media_assets.id", "已验证的头像媒体资产 ID", nullable=True),
++        c(
++            "phone_encrypted",
++            LongText,
++            "可选联系手机号（加密）；仅联系信息，未认证且不用于登录",
++            nullable=True,
++        ),
++    )
++    table(
++        "email_challenges",
++        "邮箱验证码挑战，限定用途、收件人、有效期和一次性消费",
++        ref("user_id", "users.id", "绑定邮箱的操作用户 ID；注册或找回密码时为空", nullable=True),
++        c("email_hash", sa.String(64), "验证码目标邮箱 HMAC"),
++        c("purpose", sa.String(24), "用途：REGISTER/RESET_PASSWORD/BIND_EMAIL"),
++        c("code_hash", sa.String(64), "验证码 HMAC，不保存或记录明文验证码"),
++        c("expires_at", UTCDateTime(), "验证码过期时间（UTC）"),
++        c("used_at", UTCDateTime(), "成功消费时间（UTC）；空表示未使用", nullable=True),
++    )
++    table(
++        "invitation_codes",
++        "每个用户唯一的邀请码；注册归因后不可重绑邀请人",
++        ref("user_id", "users.id", "邀请人用户 ID", unique=True),
++        c("code", sa.String(24), "公开邀请码，大小写规范化", unique=True),
++    )
++    table(
++        "invitation_configs",
++        "邀请活动配置版本；新版本仅影响之后验证邮箱并注册的用户",
++        c("version", sa.Integer, "配置版本号，递增且唯一", unique=True),
++        c("enabled", sa.Boolean, "是否启用邀请奖励", default=True),
++        c("threshold", sa.Integer, "邀请人每累计多少名有效新注册用户获得一次奖励，单位人"),
++        c("inviter_rewards", sa.JSON, "邀请人每达门槛发放的 TEXT/VOICE/VIDEO 次数组合"),
++        c("invitee_rewards", sa.JSON, "受邀人成功注册额外发放的 TEXT/VOICE/VIDEO 次数组合"),
++        ref("created_by", "admin_users.id", "发布配置的管理员 ID"),
++    )
++    table(
++        "referral_registrations",
++        "有效邀请注册记录；一名新用户仅归因一次，规则取注册时配置快照",
++        ref("invitee_id", "users.id", "验证邮箱并成功注册的受邀用户 ID", unique=True),
++        ref("inviter_id", "users.id", "邀请人用户 ID"),
++        c("config_version", sa.Integer, "注册时邀请规则版本，0表示系统默认版本"),
++        c("threshold", sa.Integer, "注册时门槛快照，单位人"),
++        c("inviter_rewards", sa.JSON, "注册时邀请人奖励次数组合快照"),
++        c("invitee_rewards", sa.JSON, "注册时受邀人奖励次数组合快照"),
++    )
++    sa.Index(
++        "ix_referral_inviter_version",
++        metadata.tables["referral_registrations"].c.inviter_id,
++        metadata.tables["referral_registrations"].c.config_version,
++    )
++    table(
++        "invitation_rewards",
++        "邀请人每个配置版本的里程碑奖励，唯一键防止重复发放",
++        ref("inviter_id", "users.id", "获得奖励的邀请人 ID"),
++        c("config_version", sa.Integer, "活动配置版本"),
++        c("milestone", sa.Integer, "已达到的第几个门槛，从 1 递增"),
++        ref("usage_id", "usage_ledger.id", "实际奖励权益流水 ID"),
++        sa.UniqueConstraint(
++            "inviter_id", "config_version", "milestone", name="uq_invitation_reward_milestone"
++        ),
++    )
++    table(
++        "promotion_links",
++        "管理后台创建的分佣推广链接及佣金配置",
++        c("code", sa.String(24), "公开推广码，唯一", unique=True),
++        c("name", sa.String(100), "推广活动名称"),
++        c("promoter_name", sa.String(100), "推广合作方或推广人名称"),
++        c("rate_bps", sa.Integer, "佣金比例，单位基点；100表示百分之一，范围0至10000"),
++        c(
++            "status",
++            sa.String(16),
++            "链接状态：ACTIVE=可用于新注册，DISABLED=停止新注册归因",
++            default="ACTIVE",
++        ),
++        ref("created_by", "admin_users.id", "创建推广链接的管理员 ID"),
++    )
++    table(
++        "promotion_attributions",
++        "新注册用户的推广归因，账号唯一且不能在购买时改写",
++        ref("user_id", "users.id", "被推广注册的用户 ID", unique=True),
++        ref("link_id", "promotion_links.id", "推广链接 ID"),
++    )
++    table(
++        "promotion_commissions",
++        "订单分佣应计台账；订单唯一，退款冲销，不执行真实转账",
++        ref("order_id", "orders.id", "产生佣金的订单 ID", unique=True),
++        ref("link_id", "promotion_links.id", "归属推广链接 ID"),
++        c("rate_bps", sa.Integer, "订单创建时固化的佣金比例（基点）"),
++        c("amount_minor", sa.Integer, "佣金金额（人民币分），按订单实付乘比例向下取整"),
++        c("status", sa.String(16), "应计状态：ACCRUED=已计提，REVERSED=退款已冲销"),
++        c("reversed_at", UTCDateTime(), "退款冲销时间（UTC）", nullable=True),
++    )
++    return [metadata.tables[name] for name in names]
+diff --git a/app/db/models.py b/app/db/models.py
+--- a/app/db/models.py
++++ b/app/db/models.py
+@@ -236,11 +236,18 @@
+ 
+ 
+ attach_schema_documentation(Base.metadata)
+-Base.metadata.tables["users"].c.status.comment = "账号状态：ACTIVE=正常，FROZEN=冻结，DELETING=删除中，DELETED=已删除"
+-Base.metadata.tables["user_consents"].c.consent_type.comment = "授权类型：PRIVACY/TERMS/AI_PROCESSING/MICROPHONE/CAMERA/SCREEN_CAPTURE；SUPPORT_REVIEW=后台人工审阅授权"
++Base.metadata.tables[
++    "users"
++].c.status.comment = "账号状态：ACTIVE=正常，FROZEN=冻结，DELETING=删除中，DELETED=已删除"
++Base.metadata.tables[
++    "user_consents"
++].c.consent_type.comment = (
++    "授权类型：PRIVACY/TERMS/AI_PROCESSING/MICROPHONE/CAMERA/SCREEN_CAPTURE；SUPPORT_REVIEW=后台人工审阅授权"
++)
+ 
+ # Register the new schema after the historical business COMMENT snapshot was applied.
+ from app.db import (  # noqa: E402, F401
+     admin_models,
+     entitlement_models,
++    growth_models,
+ )
+diff --git a/app/infrastructure/__init__.py b/app/infrastructure/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/app/infrastructure/storage/__init__.py b/app/infrastructure/storage/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/app/infrastructure/storage/oss_storage.py b/app/infrastructure/storage/oss_storage.py
+new file mode 100644
+--- /dev/null
++++ b/app/infrastructure/storage/oss_storage.py
+@@ -0,0 +1,117 @@
++"""Private OSS assets, immutable accepted objects and compatibility with local archives."""
++
++import oss2
++from oss2.credentials import StaticCredentialsProvider
++
++from app.core.errors import BusinessError, require
++from app.infrastructure.storage.sts_service import STSService
++from app.providers.storage import LocalStorage
++
++
++class OSSStorage:
++    def __init__(self, settings, security, cache):
++        self.settings = settings
++        self.sts = STSService(settings, security, cache)
++        self.legacy = LocalStorage(settings, security)
++        self.session = oss2.Session()
++
++    @staticmethod
++    def cloud_key(key):
++        return key.startswith("ai-interview/user/")
++
++    def bucket(self):
++        credentials = self.sts.server()
++        auth = oss2.ProviderAuthV4(
++            StaticCredentialsProvider(
++                credentials["access_key_id"], credentials["access_key_secret"], credentials["security_token"]
++            )
++        )
++        return oss2.Bucket(
++            auth,
++            self.settings.oss_endpoint,
++            self.settings.oss_bucket_name,
++            region=self.settings.oss_region,
++            session=self.session,
++            connect_timeout=10,
++        )
++
++    @staticmethod
++    def _run(action):
++        try:
++            return action()
++        except oss2.exceptions.NoSuchKey as exc:
++            raise BusinessError("MEDIA_NOT_UPLOADED", "文件尚未上传或已删除", 409) from exc
++        except oss2.exceptions.ServerError as exc:
++            if exc.status == 412:
++                raise BusinessError("MEDIA_ETAG_MISMATCH", "上传对象已变化，请重新确认", 409) from exc
++            if exc.status == 403:
++                raise BusinessError("OSS_ACCESS_DENIED", "OSS 文件权限不足，请联系管理员", 503) from exc
++            raise BusinessError("OSS_UNAVAILABLE", "文件存储服务暂不可用，请稍后重试", 503) from exc
++        except oss2.exceptions.RequestError as exc:
++            raise BusinessError("OSS_UNAVAILABLE", "无法连接文件存储服务，请稍后重试", 503) from exc
++
++    def put(self, key, content, mime):
++        require(self.cloud_key(key), "MEDIA_INVALID_KEY", "OSS 文件路径无效")
++        self._run(lambda: self.bucket().put_object(key, content, headers={"Content-Type": mime}))
++
++    def read(self, key):
++        return self.read_version(key, None)
++
++    def read_version(self, key, etag):
++        if not self.cloud_key(key):
++            return self.legacy.read(key)
++
++        def fetch():
++            result = self.bucket().get_object(key, headers={"If-Match": etag} if etag else None)
++            return result.read(512 * 1024 * 1024 + 1)
++
++        return self._run(fetch)
++
++    def head(self, key):
++        if not self.cloud_key(key):
++            return self.legacy.head(key)
++        result = self._run(lambda: self.bucket().head_object(key))
++        return {
++            "size": result.content_length,
++            "etag": result.etag.strip('"'),
++            "mime": result.headers.get("Content-Type"),
++        }
++
++    def delete(self, key):
++        if not self.cloud_key(key):
++            return self.legacy.delete(key)
++        self._run(lambda: self.bucket().delete_object(key))
++
++    def finalize(self, asset, etag):
++        if not self.cloud_key(asset.object_key):
++            return self.legacy.finalize(asset, etag)
++        require("/incoming/" in asset.object_key, "MEDIA_INVALID_KEY", "待确认文件路径无效")
++        key = asset.object_key.replace("/incoming/", "/accepted/", 1)
++        self._run(
++            lambda: self.bucket().copy_object(
++                self.settings.oss_bucket_name,
++                asset.object_key,
++                key,
++                headers={"x-oss-copy-source-if-match": etag},
++            )
++        )
++        self.delete(asset.object_key)
++        return key
++
++    def url(self, asset, purpose="download", seconds=None):
++        if not self.cloud_key(asset.object_key):
++            return self.legacy.url(asset, purpose)
++        require(purpose == "download", "MEDIA_INVALID_STATE", "OSS 上传请使用 STS 凭证")
++        return self._run(
++            lambda: self.bucket().sign_url(
++                "GET", asset.object_key, seconds or self.settings.upload_url_seconds, slash_safe=True
++            )
++        )
++
++    def path(self, key):
++        require(not self.cloud_key(key), "MEDIA_INVALID_KEY", "OSS 文件不在本地")
++        return self.legacy.path(key)
++
++    def check_ready(self):
++        result = self._run(lambda: self.bucket().get_bucket_acl())
++        require(result.acl == "private", "OSS_BUCKET_NOT_PRIVATE", "OSS 存储空间必须设为私有", 503)
+diff --git a/app/infrastructure/storage/sts_service.py b/app/infrastructure/storage/sts_service.py
+new file mode 100644
+--- /dev/null
++++ b/app/infrastructure/storage/sts_service.py
+@@ -0,0 +1,143 @@
++"""Issue scoped, short-lived OSS credentials. Long-term RAM keys never leave the server."""
++
++import json
++import re
++from datetime import datetime, timezone
++
++from aliyunsdkcore.client import AcsClient
++from aliyunsdkcore.request import CommonRequest
++
++from app.core.errors import BusinessError, require
++
++
++class STSService:
++    def __init__(self, settings, security, cache):
++        self.settings, self.security, self.cache = settings, security, cache
++
++    def _issue(self, scope, session_name, policy):
++        settings = self.settings
++        require(
++            settings.aliyun_access_key_id
++            and settings.aliyun_access_key_secret
++            and settings.aliyun_ram_role_arn,
++            "OSS_NOT_CONFIGURED",
++            "OSS 授权服务未配置",
++            503,
++        )
++        cache_key = "oss:sts:" + self.security.identity_hash(
++            settings.aliyun_ram_role_arn
++            + ":"
++            + settings.oss_bucket_name
++            + ":"
++            + scope
++            + ":"
++            + json.dumps(policy, sort_keys=True)
++        )
++        cached = self.cache.get(cache_key)
++        if cached:
++            try:
++                data = json.loads(self.security.decrypt(cached))
++                if self._remaining(data["expiration"]) > 600:
++                    return data
++            except (ValueError, KeyError, TypeError):
++                pass
++        try:
++            client = AcsClient(
++                settings.aliyun_access_key_id,
++                settings.aliyun_access_key_secret,
++                settings.oss_region,
++                connect_timeout=5,
++                timeout=15,
++            )
++            request = CommonRequest(product="Sts", version="2015-04-01", action_name="AssumeRole")
++            request.set_domain(settings.oss_sts_endpoint)
++            request.set_protocol_type("https")
++            request.set_method("POST")
++            request.set_accept_format("JSON")
++            for name, value in {
++                "RoleArn": settings.aliyun_ram_role_arn,
++                "RoleSessionName": session_name,
++                "DurationSeconds": str(settings.oss_sts_duration_seconds),
++                "Policy": json.dumps(policy, separators=(",", ":")),
++            }.items():
++                request.add_query_param(name, value)
++            response = json.loads(client.do_action_with_exception(request))["Credentials"]
++            data = {
++                "access_key_id": response["AccessKeyId"],
++                "access_key_secret": response["AccessKeySecret"],
++                "security_token": response["SecurityToken"],
++                "expiration": response["Expiration"],
++            }
++            require(
++                all(isinstance(value, str) and value for value in data.values())
++                and self._remaining(data["expiration"]) > 600,
++                "OSS_AUTH_UNAVAILABLE",
++                "OSS 临时授权返回无效",
++                503,
++            )
++        except BusinessError:
++            raise
++        except Exception as exc:
++            raise BusinessError("OSS_AUTH_UNAVAILABLE", "OSS 临时授权暂不可用，请稍后重试", 503) from exc
++        self.cache.put(
++            cache_key,
++            self.security.encrypt(json.dumps(data)),
++            max(1, int(self._remaining(data["expiration"])) - 600),
++        )
++        return data
++
++    @staticmethod
++    def _remaining(expiration):
++        return (
++            datetime.fromisoformat(expiration.replace("Z", "+00:00")) - datetime.now(timezone.utc)
++        ).total_seconds()
++
++    def upload(self, user_id, object_key):
++        require(re.fullmatch(r"[a-zA-Z0-9-]{1,64}", user_id), "MEDIA_INVALID_KEY", "用户存储范围无效")
++        prefix = f"ai-interview/user/{user_id}/incoming/"
++        require(
++            object_key.startswith(prefix) and ".." not in object_key.split("/") and "*" not in object_key,
++            "MEDIA_INVALID_KEY",
++            "上传对象不在当前用户的授权范围",
++            403,
++        )
++        require(self.cache.hit(f"oss:grant:{user_id}", 20, 60), "RATE_LIMITED", "文件授权请求过于频繁", 429)
++        policy = {
++            "Version": "1",
++            "Statement": [
++                {
++                    "Effect": "Allow",
++                    "Action": ["oss:PutObject", "oss:AbortMultipartUpload", "oss:ListParts"],
++                    "Resource": [f"acs:oss:*:*:{self.settings.oss_bucket_name}/{object_key}"],
++                }
++            ],
++        }
++        credentials = self._issue(f"upload:{user_id}:{object_key}", f"interview_{user_id}", policy)
++        return {
++            **credentials,
++            "bucket": self.settings.oss_bucket_name,
++            "endpoint": self.settings.oss_endpoint,
++            "region": self.settings.oss_region,
++            "object_key": object_key,
++            "prefix": prefix,
++        }
++
++    def server(self):
++        # Kept inside the backend. Browser sessions never receive this policy or its credentials.
++        bucket = self.settings.oss_bucket_name
++        policy = {
++            "Version": "1",
++            "Statement": [
++                {
++                    "Effect": "Allow",
++                    "Action": ["oss:GetObject", "oss:PutObject", "oss:DeleteObject"],
++                    "Resource": [f"acs:oss:*:*:{bucket}/ai-interview/user/*"],
++                },
++                {"Effect": "Allow", "Action": ["oss:GetBucketAcl"], "Resource": [f"acs:oss:*:*:{bucket}"]},
++            ],
++        }
++        return self._issue("backend", "ai_interview_backend", policy)
++
++
++def generate_sts_token(user_id, object_key, runtime):
++    return STSService(runtime.settings, runtime.security, runtime.cache).upload(user_id, object_key)
+diff --git a/app/main.py b/app/main.py
+--- a/app/main.py
++++ b/app/main.py
+@@ -13,7 +13,8 @@
+ from sqlalchemy.orm.exc import StaleDataError
+ from starlette.exceptions import HTTPException
+ 
+-from app.api import admin, billing, identity, interviews, jobs, media, ops
++from app.api import accounts, admin, billing, growth, identity, interviews, jobs, media, ops
++from app.api.v1 import storage as cloud_storage
+ from app.core.errors import BusinessError
+ from app.core.security import new_id
+ from app.runtime import Runtime
+@@ -130,14 +131,27 @@
+                 connection.execute(text("SELECT version_num FROM alembic_version"))
+             if rt.cache.redis:
+                 rt.cache.redis.ping()
++            if rt.settings.storage_backend == "oss":
++                rt.storage.check_ready()
+             if rt.settings.storage_backend == "s3":
+                 rt.storage.client.head_bucket(Bucket=rt.settings.s3_bucket)
+         except Exception:
+             return error(request, 503, "DEPENDENCY_UNAVAILABLE", "数据库迁移/Redis/对象存储未就绪")
+         return {"status": "ready"}
+ 
+-    for router in (admin.router, identity.router, jobs.router, interviews.router, media.router, billing.router, ops.router):
++    for router in (
++        admin.router,
++        accounts.router,
++        growth.router,
++        identity.router,
++        jobs.router,
++        interviews.router,
++        media.router,
++        billing.router,
++        ops.router,
++    ):
+         app.include_router(router, prefix="/api/v1")
++    app.include_router(cloud_storage.router, prefix="/api/v1")
+     return app
+ 
+ 
+diff --git a/app/modules/accounts/service.py b/app/modules/accounts/service.py
+new file mode 100644
+--- /dev/null
++++ b/app/modules/accounts/service.py
+@@ -0,0 +1,264 @@
++import hmac
++import secrets
++import time
++from datetime import timedelta
++
++from sqlalchemy import select
++
++from app.core.errors import require
++from app.core.security import new_id, utcnow
++from app.db.growth_models import EmailChallenge, UserAccount
++from app.db.models import MediaAsset, User
++from app.db.repository import owned
++from app.modules.admin.security import password_hash, password_matches
++from app.modules.billing.service import BillingService
++from app.modules.shared import Service
++from app.providers.mail import deliver_code
++
++
++class AccountService(Service):
++    def account(self, uid=None, lock=False):
++        statement = (
++            select(UserAccount)
++            .where(UserAccount.user_id == (uid or self.uid))
++            .execution_options(populate_existing=True)
++        )
++        return self.db.scalar(statement.with_for_update() if lock else statement)
++
++    def digest(self, email):
++        return self.rt.security.identity_hash("email:" + email)
++
++    def send_code(self, email, purpose, ip="local"):
++        digest = self.digest(email)
++        require(
++            self.rt.cache.hit(f"email:send:address:{digest}", 1, 60)
++            and self.rt.cache.hit(f"email:send:hour:{digest}", 5, 3600)
++            and self.rt.cache.hit(f"email:send:ip:{ip}:{int(time.time() // 3600)}", 20, 3600),
++            "RATE_LIMITED",
++            "验证码请求过于频繁，请稍后重试",
++            429,
++        )
++        code = f"{secrets.randbelow(1000000):06d}"
++        challenge = EmailChallenge(
++            user_id=self.uid if purpose == "BIND_EMAIL" else None,
++            email_hash=digest,
++            purpose=purpose,
++            code_hash="",
++            expires_at=utcnow() + timedelta(minutes=10),
++        )
++        self.db.add(challenge)
++        self.db.flush()
++        challenge.code_hash = self.rt.security.identity_hash(f"email-code:{challenge.id}:{code}")
++        delivery = deliver_code(self.rt.settings, email, code, purpose)
++        return {"challenge_id": challenge.id, "expires_in": 600, "resend_after": 60, **delivery}
++
++    def verify(self, data, purpose):
++        challenge = self.db.scalar(
++            select(EmailChallenge).where(EmailChallenge.id == data.challenge_id).with_for_update()
++        )
++        require(
++            self.rt.cache.hit(f"email:verify:{data.challenge_id}", 5, 600),
++            "EMAIL_CODE_LOCKED",
++            "验证码尝试次数过多，请重新获取",
++            429,
++        )
++        require(
++            challenge
++            and challenge.purpose == purpose
++            and challenge.email_hash == self.digest(data.email)
++            and challenge.user_id == (self.uid if purpose == "BIND_EMAIL" else None)
++            and not challenge.used_at
++            and challenge.expires_at > utcnow()
++            and hmac.compare_digest(
++                challenge.code_hash,
++                self.rt.security.identity_hash(f"email-code:{data.challenge_id}:{data.code}"),
++            ),
++            "EMAIL_CODE_INVALID",
++            "验证码错误、已使用或已过期",
++            400,
++        )
++        challenge.used_at = utcnow()
++
++    def result(self, user):
++        from app.modules.identity.service import IdentityService
++
++        account = self.account(user.id)
++        return {
++            "access_token": self.rt.security.token(user.id, account.auth_version if account else 0),
++            "expires_in": self.rt.settings.access_token_minutes * 60,
++            "user": IdentityService(self.rt, self.db, user.id).view(user),
++        }
++
++    def register(self, data):
++        require(
++            not self.db.scalar(
++                select(UserAccount.id).where(UserAccount.email_hash == self.digest(data.email))
++            ),
++            "EMAIL_ALREADY_REGISTERED",
++            "该邮箱已注册，请使用邮箱和密码登录",
++            409,
++        )
++        self.verify(data, "REGISTER")
++        user = User(
++            openid_hash=self.rt.security.identity_hash("account:" + new_id()),
++            nickname=data.nickname.strip() or "面试练习者",
++            credits=self.rt.settings.initial_credits,
++        )
++        self.db.add(user)
++        self.db.flush()
++        self.db.add(
++            UserAccount(
++                user_id=user.id,
++                email_hash=self.digest(data.email),
++                email_encrypted=self.rt.security.encrypt(data.email),
++                password_hash=password_hash(data.password),
++                auth_version=1,
++            )
++        )
++        self.db.flush()
++        billing = BillingService(self.rt, self.db, user.id)
++        billing.ledger("WELCOME", {"UNIVERSAL": user.credits}, "GRANTED", f"welcome:{user.id}")
++        from app.modules.growth.service import GrowthService
++
++        GrowthService(self.rt, self.db, user.id).registration(data.invite_code, data.promotion_code)
++        self.uid = user.id
++        self.audit("EMAIL_REGISTERED", user.id)
++        return self.result(user)
++
++    def login(self, data, ip="local"):
++        digest = self.digest(data.email)
++        require(
++            self.rt.cache.hit(f"email:login:{digest}", 8, 300)
++            and self.rt.cache.hit(f"email:login:ip:{ip}", 30, 300),
++            "RATE_LIMITED",
++            "登录尝试过多，请稍后重试",
++            429,
++        )
++        account = self.db.scalar(select(UserAccount).where(UserAccount.email_hash == digest))
++        user = None
++        if account:
++            user = BillingService(self.rt, self.db, account.user_id).lock_user()
++            account = self.account(account.user_id, lock=True)
++            if account.email_hash != digest:
++                account = None
++        fallback = "scrypt$" + "0" * 32 + "$" + "0" * 128
++        matched = password_matches(
++            data.password, account.password_hash if account and account.password_hash else fallback
++        )
++        require(
++            matched and user and user.status == "ACTIVE", "AUTH_LOGIN_FAILED", "邮箱、密码或账号状态无效", 401
++        )
++        self.uid = user.id
++        self.audit("EMAIL_LOGIN", user.id)
++        return self.result(user)
++
++    def check_password(self, account, password):
++        require(
++            self.rt.cache.hit(f"account:security:{self.uid}", 8, 300),
++            "RATE_LIMITED",
++            "安全操作尝试过多，请稍后重试",
++            429,
++        )
++        require(
++            account and account.password_hash and password_matches(password or "", account.password_hash),
++            "PASSWORD_INVALID",
++            "当前密码不正确，或请先绑定邮箱并设置密码",
++            401,
++        )
++
++    def bind_email(self, data):
++        BillingService(self.rt, self.db, self.uid).lock_user()
++        account = self.account(lock=True)
++        existing = self.db.scalar(
++            select(UserAccount).where(UserAccount.email_hash == self.digest(data.email))
++        )
++        require(
++            not existing or existing.user_id == self.uid,
++            "EMAIL_ALREADY_REGISTERED",
++            "该邮箱已被其他账号绑定",
++            409,
++        )
++        if account and account.password_hash:
++            self.check_password(account, data.current_password)
++        else:
++            require(data.new_password, "PASSWORD_REQUIRED", "首次绑定邮箱时请设置至少 10 位的登录密码")
++        self.verify(data, "BIND_EMAIL")
++        if not account:
++            account = UserAccount(user_id=self.uid, auth_version=0)
++            self.db.add(account)
++        account.email_hash = self.digest(data.email)
++        account.email_encrypted = self.rt.security.encrypt(data.email)
++        if data.new_password:
++            account.password_hash = password_hash(data.new_password)
++        account.auth_version += 1
++        self.db.flush()
++        self.audit("EMAIL_BOUND", self.uid)
++        return self.result(self.db.get(User, self.uid))
++
++    def change_password(self, data):
++        BillingService(self.rt, self.db, self.uid).lock_user()
++        account = self.account(lock=True)
++        self.check_password(account, data.current_password)
++        account.password_hash = password_hash(data.new_password)
++        account.auth_version += 1
++        self.db.flush()
++        self.audit("PASSWORD_CHANGED", self.uid)
++        return self.result(self.db.get(User, self.uid))
++
++    def reset_password(self, data):
++        self.verify(data, "RESET_PASSWORD")
++        account = self.db.scalar(select(UserAccount).where(UserAccount.email_hash == self.digest(data.email)))
++        require(account, "AUTH_LOGIN_FAILED", "请先注册邮箱账号", 400)
++        user = BillingService(self.rt, self.db, account.user_id).lock_user()
++        account = self.account(account.user_id, lock=True)
++        require(user.status == "ACTIVE", "AUTH_ACCOUNT_DISABLED", "账号不可用", 403)
++        account.password_hash = password_hash(data.new_password)
++        account.auth_version += 1
++        self.db.flush()
++        self.uid = user.id
++        self.audit("PASSWORD_RESET", user.id)
++        return self.result(user)
++
++    def avatar(self, asset_id):
++        BillingService(self.rt, self.db, self.uid).lock_user()
++        from app.modules.media.service import aware
++
++        asset = owned(self.db, MediaAsset, asset_id, self.uid)
++        require(
++            asset.media_type == "AVATAR"
++            and asset.status == "READY"
++            and not asset.deleted_at
++            and aware(asset.expires_at) > utcnow(),
++            "AVATAR_NOT_READY",
++            "请上传并确认有效头像后再保存",
++            409,
++        )
++        account = self.account(lock=True)
++        if not account:
++            account = UserAccount(user_id=self.uid, auth_version=0)
++            self.db.add(account)
++        previous_avatar = account.avatar_asset_id
++        account.avatar_asset_id = asset.id
++        asset.expires_at = utcnow() + timedelta(days=3650)
++        self.db.flush()
++        if previous_avatar and previous_avatar != asset.id:
++            from app.modules.media.service import MediaService
++
++            MediaService(self.rt, self.db, self.uid).delete(previous_avatar)
++        self.audit("AVATAR_UPDATED", self.uid)
++        from app.modules.identity.service import IdentityService
++
++        return IdentityService(self.rt, self.db, self.uid).view(self.db.get(User, self.uid))
++
++    def contact(self, phone):
++        BillingService(self.rt, self.db, self.uid).lock_user()
++        account = self.account(lock=True)
++        if not account:
++            account = UserAccount(user_id=self.uid, auth_version=0)
++            self.db.add(account)
++        account.phone_encrypted = self.rt.security.encrypt(phone) if phone else None
++        self.db.flush()
++        self.audit("CONTACT_UPDATED", self.uid)
++        from app.modules.identity.service import IdentityService
++
++        return IdentityService(self.rt, self.db, self.uid).view(self.db.get(User, self.uid))
+diff --git a/app/modules/admin/security.py b/app/modules/admin/security.py
+--- a/app/modules/admin/security.py
++++ b/app/modules/admin/security.py
+@@ -19,6 +19,8 @@
+         "quality:assign",
+         "product:read",
+         "product:write",
++        "growth:read",
++        "growth:write",
+         "ai:read",
+     },
+     "SUPPORT": {
+@@ -42,6 +44,8 @@
+         "order:refund",
+         "product:read",
+         "product:write",
++        "growth:read",
++        "growth:write",
+         "payment:read",
+         "payment:write",
+         "reconciliation:write",
+diff --git a/app/modules/admin/service.py b/app/modules/admin/service.py
+--- a/app/modules/admin/service.py
++++ b/app/modules/admin/service.py
+@@ -232,6 +232,8 @@
+                 Params={"Bucket": self.rt.settings.s3_bucket, "Key": asset.object_key},
+                 ExpiresIn=seconds,
+             )
++        elif self.rt.settings.storage_backend == "oss" and self.rt.storage.cloud_key(asset.object_key):
++            url = self.rt.storage.url(asset, seconds=seconds)
+         else:
+             expires = int(utcnow().timestamp()) + seconds
+             signature = self.rt.security.sign_object(asset.id, "download", expires)
+diff --git a/app/modules/ai_engine/service.py b/app/modules/ai_engine/service.py
+--- a/app/modules/ai_engine/service.py
++++ b/app/modules/ai_engine/service.py
+@@ -121,6 +121,8 @@
+                 asset_id = new_id()
+                 extension = "wav" if output["mime_type"] == "audio/wav" else "mp3"
+                 key = f"{self.rt.settings.environment}/users/{self.uid}/tts/{asset_id}.{extension}"
++                if self.rt.settings.storage_backend == "oss":
++                    key = f"ai-interview/user/{self.uid}/generated/{asset_id}.{extension}"
+                 self.rt.storage.put(key, audio, output["mime_type"])
+                 asset = MediaAsset(
+                     id=asset_id,
+diff --git a/app/modules/billing/service.py b/app/modules/billing/service.py
+--- a/app/modules/billing/service.py
++++ b/app/modules/billing/service.py
+@@ -158,6 +158,7 @@
+     def order(self, data, key):
+         def create():
+             from app.db.admin_models import OrderSnapshot, Product
++            from app.modules.growth.service import GrowthService
+ 
+             version = self.db.scalar(
+                 select(Product)
+@@ -190,6 +191,7 @@
+                     snapshot_json={
+                         "code": data.product_code,
+                         "version": version.version if version else 0,
++                        "promotion": GrowthService(self.rt, self.db, self.uid).promotion_snapshot(),
+                         "currency": "CNY",
+                         **product,
+                     },
+@@ -234,6 +236,9 @@
+                 self.ledger(
+                     "PURCHASE", amounts, "GRANTED", f"order:{order_id}", amount_minor=row.amount_minor
+                 )
++                from app.modules.growth.service import GrowthService
++
++                GrowthService(self.rt, self.db, self.uid).on_paid(row)
+             self.db.refresh(row)
+             self.audit("DEV_ORDER_PAID", row.id)
+             return self.order_view(row)
+@@ -274,6 +279,9 @@
+                     f"refund:{order_id}",
+                     amount_minor=-row.amount_minor,
+                 )
++            from app.modules.growth.service import GrowthService
++
++            GrowthService(self.rt, self.db, self.uid).on_refund(row)
+             self.db.refresh(row)
+             self.audit("ORDER_REFUNDED", row.id)
+             return self.order_view(row)
+diff --git a/app/modules/growth/service.py b/app/modules/growth/service.py
+new file mode 100644
+--- /dev/null
++++ b/app/modules/growth/service.py
+@@ -0,0 +1,299 @@
++import secrets
++from urllib.parse import urlencode
++
++from sqlalchemy import func, select
++
++from app.core.errors import require
++from app.core.security import utcnow
++from app.db.admin_models import OrderSnapshot
++from app.db.growth_models import (
++    InvitationCode,
++    InvitationConfig,
++    InvitationReward,
++    PromotionAttribution,
++    PromotionCommission,
++    PromotionLink,
++    ReferralRegistration,
++)
++from app.db.models import User
++from app.db.repository import page_query
++from app.modules.billing.service import BillingService
++from app.modules.shared import Service
++
++
++class GrowthService(Service):
++    def config(self):
++        row = self.db.scalar(select(InvitationConfig).order_by(InvitationConfig.version.desc()).limit(1))
++        return (
++            self.config_view(row)
++            if row
++            else {
++                "id": None,
++                "version": 0,
++                "enabled": True,
++                "threshold": 3,
++                "inviter_rewards": {"TEXT": 1, "VOICE": 0, "VIDEO": 0},
++                "invitee_rewards": {"TEXT": 1, "VOICE": 0, "VIDEO": 0},
++            }
++        )
++
++    @staticmethod
++    def config_view(row):
++        return {
++            name: getattr(row, name)
++            for name in ("id", "version", "enabled", "threshold", "inviter_rewards", "invitee_rewards")
++        }
++
++    def configure(self, data, admin_id):
++        row = InvitationConfig(
++            **data.model_dump(exclude={"reason"}), version=self.config()["version"] + 1, created_by=admin_id
++        )
++        self.db.add(row)
++        self.db.flush()
++        return self.config_view(row)
++
++    @staticmethod
++    def code():
++        return "".join(secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ23456789") for _ in range(10))
++
++    def invitation(self):
++        BillingService(self.rt, self.db, self.uid).lock_user()
++        row = self.db.scalar(select(InvitationCode).where(InvitationCode.user_id == self.uid))
++        if not row:
++            row = InvitationCode(user_id=self.uid, code=self.code())
++            self.db.add(row)
++            self.db.flush()
++        return row
++
++    def invitation_view(self):
++        code = self.invitation().code
++        config = self.config()
++        total = self.db.scalar(
++            select(func.count())
++            .select_from(ReferralRegistration)
++            .where(ReferralRegistration.inviter_id == self.uid)
++        )
++        count = self.db.scalar(
++            select(func.count())
++            .select_from(ReferralRegistration)
++            .where(
++                ReferralRegistration.inviter_id == self.uid,
++                ReferralRegistration.config_version == config["version"],
++            )
++        )
++        rewards = self.db.scalar(
++            select(func.count()).select_from(InvitationReward).where(InvitationReward.inviter_id == self.uid)
++        )
++        recent = self.db.scalars(
++            select(ReferralRegistration)
++            .where(ReferralRegistration.inviter_id == self.uid)
++            .order_by(ReferralRegistration.created_at.desc())
++            .limit(20)
++        ).all()
++        return {
++            "code": code,
++            "url": self.rt.settings.web_base_url.rstrip("/") + "/register?" + urlencode({"invite": code}),
++            "valid_invites": total,
++            "current_rule_invites": count,
++            "reward_count": rewards,
++            "next_reward_in": config["threshold"] - (count % config["threshold"]),
++            "rules": config,
++            "recent": [
++                {"id": row.id, "registered_at": row.created_at, "status": "REGISTERED"} for row in recent
++            ],
++        }
++
++    def grant(self, uid, rewards, kind, key):
++        amounts = {mode: count for mode, count in rewards.items() if count > 0}
++        if not amounts:
++            return None
++        billing = BillingService(self.rt, self.db, uid)
++        billing.lock_user()
++        for mode, count in amounts.items():
++            billing.change_balance(mode, count)
++        return billing.ledger(kind, amounts, "GRANTED", key)
++
++    def registration(self, invite_code=None, promotion_code=None):
++        if invite_code:
++            code = self.db.scalar(
++                select(InvitationCode).where(InvitationCode.code == invite_code.strip().upper())
++            )
++            inviter = self.db.get(User, code.user_id) if code else None
++            require(
++                inviter and inviter.status == "ACTIVE" and inviter.id != self.uid,
++                "INVITATION_INVALID",
++                "邀请码无效，或邀请人账号不可用",
++                400,
++            )
++            BillingService(self.rt, self.db, inviter.id).lock_user()
++            config = self.config()
++            self.db.add(
++                ReferralRegistration(
++                    invitee_id=self.uid,
++                    inviter_id=inviter.id,
++                    config_version=config["version"],
++                    threshold=config["threshold"],
++                    inviter_rewards=config["inviter_rewards"],
++                    invitee_rewards=config["invitee_rewards"],
++                )
++            )
++            self.db.flush()
++            if config["enabled"]:
++                self.grant(self.uid, config["invitee_rewards"], "INVITEE_REWARD", f"invitee:{self.uid}")
++                count = self.db.scalar(
++                    select(func.count())
++                    .select_from(ReferralRegistration)
++                    .where(
++                        ReferralRegistration.inviter_id == inviter.id,
++                        ReferralRegistration.config_version == config["version"],
++                    )
++                )
++                milestone = count // config["threshold"]
++                previous = self.db.scalar(
++                    select(func.coalesce(func.max(InvitationReward.milestone), 0)).where(
++                        InvitationReward.inviter_id == inviter.id,
++                        InvitationReward.config_version == config["version"],
++                    )
++                )
++                for index in range(previous + 1, milestone + 1):
++                    entry = self.grant(
++                        inviter.id,
++                        config["inviter_rewards"],
++                        "INVITER_REWARD",
++                        f"inviter:{inviter.id}:{config['version']}:{index}",
++                    )
++                    if entry:
++                        self.db.add(
++                            InvitationReward(
++                                inviter_id=inviter.id,
++                                config_version=config["version"],
++                                milestone=index,
++                                usage_id=entry.id,
++                            )
++                        )
++        if promotion_code:
++            link = self.db.scalar(
++                select(PromotionLink).where(
++                    PromotionLink.code == promotion_code.strip().upper(), PromotionLink.status == "ACTIVE"
++                )
++            )
++            require(link, "PROMOTION_INVALID", "推广链接已停用或不存在", 400)
++            self.db.add(PromotionAttribution(user_id=self.uid, link_id=link.id))
++        self.db.flush()
++
++    def promotion_snapshot(self):
++        attribution = self.db.scalar(
++            select(PromotionAttribution).where(PromotionAttribution.user_id == self.uid)
++        )
++        if not attribution:
++            return None
++        link = self.db.get(PromotionLink, attribution.link_id)
++        return {"link_id": link.id, "rate_bps": link.rate_bps}
++
++    def on_paid(self, order):
++        snapshot = self.db.scalar(select(OrderSnapshot).where(OrderSnapshot.order_id == order.id))
++        promotion = snapshot.snapshot_json.get("promotion") if snapshot else None
++        if not promotion:
++            return
++        if self.db.scalar(select(PromotionCommission.id).where(PromotionCommission.order_id == order.id)):
++            return
++        self.db.add(
++            PromotionCommission(
++                order_id=order.id,
++                link_id=promotion["link_id"],
++                rate_bps=promotion["rate_bps"],
++                amount_minor=order.amount_minor * promotion["rate_bps"] // 10000,
++                status="ACCRUED",
++            )
++        )
++
++    def on_refund(self, order):
++        commission = self.db.scalar(
++            select(PromotionCommission).where(PromotionCommission.order_id == order.id).with_for_update()
++        )
++        if commission and commission.status == "ACCRUED":
++            commission.status = "REVERSED"
++            commission.reversed_at = utcnow()
++
++    def promotion(self, data, admin_id, link_id=None):
++        if link_id:
++            row = self.db.get(PromotionLink, link_id)
++            require(row, "RESOURCE_NOT_FOUND", "推广链接不存在", 404)
++            for key, value in data.model_dump(exclude={"reason"}).items():
++                setattr(row, key, value)
++        else:
++            row = PromotionLink(**data.model_dump(exclude={"reason"}), code=self.code(), created_by=admin_id)
++            self.db.add(row)
++        self.db.flush()
++        return self.promotion_view(row)
++
++    def promotion_view(self, row):
++        counts = self.db.scalar(
++            select(func.count())
++            .select_from(PromotionAttribution)
++            .where(PromotionAttribution.link_id == row.id)
++        )
++        amounts = dict(
++            self.db.execute(
++                select(
++                    PromotionCommission.status, func.coalesce(func.sum(PromotionCommission.amount_minor), 0)
++                )
++                .where(PromotionCommission.link_id == row.id)
++                .group_by(PromotionCommission.status)
++            ).all()
++        )
++        return {
++            **{
++                name: getattr(row, name)
++                for name in ("id", "code", "name", "promoter_name", "rate_bps", "status", "created_at")
++            },
++            "url": self.rt.settings.web_base_url.rstrip("/")
++            + "/register?"
++            + urlencode({"promotion": row.code}),
++            "registrations": counts,
++            "accrued_minor": int(amounts.get("ACCRUED", 0)),
++            "reversed_minor": int(amounts.get("REVERSED", 0)),
++        }
++
++    def promotions(self, page=1, page_size=20):
++        rows, total = page_query(
++            self.db, select(PromotionLink).order_by(PromotionLink.created_at.desc()), page, page_size
++        )
++        return {
++            "items": [self.promotion_view(row) for row in rows],
++            "total": total,
++            "page": page,
++            "page_size": page_size,
++        }
++
++    def commissions(self, page=1, page_size=20):
++        rows, total = page_query(
++            self.db,
++            select(PromotionCommission).order_by(PromotionCommission.created_at.desc()),
++            page,
++            page_size,
++        )
++        return {
++            "items": [
++                {
++                    **{
++                        name: getattr(row, name)
++                        for name in (
++                            "id",
++                            "order_id",
++                            "link_id",
++                            "rate_bps",
++                            "amount_minor",
++                            "status",
++                            "created_at",
++                            "reversed_at",
++                        )
++                    },
++                    "promoter_name": self.db.get(PromotionLink, row.link_id).promoter_name,
++                }
++                for row in rows
++            ],
++            "total": total,
++            "page": page,
++            "page_size": page_size,
++        }
+diff --git a/app/modules/identity/service.py b/app/modules/identity/service.py
+--- a/app/modules/identity/service.py
++++ b/app/modules/identity/service.py
+@@ -58,8 +58,11 @@
+                 )
+             )
+         require(user.status == "ACTIVE", "AUTH_ACCOUNT_DISABLED", "账号不可用", 403)
++        from app.modules.accounts.service import AccountService
++
++        account = AccountService(self.rt, self.db, user.id).account()
+         return {
+-            "access_token": self.rt.security.token(user.id),
++            "access_token": self.rt.security.token(user.id, account.auth_version if account else 0),
+             "token_type": "bearer",
+             "expires_in": self.rt.settings.access_token_minutes * 60,
+             "user": self.view(user),
+@@ -73,6 +76,15 @@
+             not revoked and user is not None and user.status in ("ACTIVE", "DELETING"),
+             "AUTH_UNAUTHORIZED",
+             "登录状态已失效",
++            401,
++        )
++        from app.modules.accounts.service import AccountService
++
++        account = AccountService(self.rt, self.db, user.id).account()
++        require(
++            not account or claims.get("ver", 0) == account.auth_version,
++            "AUTH_UNAUTHORIZED",
++            "账号安全信息已更新，请重新登录",
+             401,
+         )
+         self.uid = user.id
+@@ -92,10 +104,29 @@
+         return {"logged_out": True}
+ 
+     def view(self, user):
++        from app.modules.accounts.service import AccountService
+         from app.modules.billing.service import credit_balances
+ 
++        account = AccountService(self.rt, self.db, user.id).account()
++        avatar_url = None
++        if account and account.avatar_asset_id:
++            from app.db.models import MediaAsset
++            from app.modules.media.service import MediaService
++
++            asset = self.db.get(MediaAsset, account.avatar_asset_id)
++            if asset and asset.status == "READY" and not asset.deleted_at:
++                avatar_url = MediaService(self.rt, self.db, user.id).view(asset)["download_url"]
+         return {
+             "id": user.id,
++            "email": self.rt.security.decrypt(account.email_encrypted)
++            if account and account.email_encrypted
++            else None,
++            "has_password": bool(account and account.password_hash),
++            "avatar_url": avatar_url,
++            "contact_phone": self.rt.security.decrypt(account.phone_encrypted)
++            if account and account.phone_encrypted
++            else None,
++            "phone_verified": False,
+             "nickname": user.nickname,
+             "status": user.status,
+             **credit_balances(self.db, user),
+diff --git a/app/modules/media/service.py b/app/modules/media/service.py
+--- a/app/modules/media/service.py
++++ b/app/modules/media/service.py
+@@ -30,6 +30,7 @@
+         "audio/webm": {".webm"},
+     },
+     "VIDEO": {"video/mp4": {".mp4"}, "video/webm": {".webm"}},
++    "AVATAR": {"image/png": {".png"}, "image/jpeg": {".jpg", ".jpeg"}},
+     "JD_IMAGE": {"image/png": {".png"}, "image/jpeg": {".jpg", ".jpeg"}},
+ }
+ 
+@@ -70,6 +71,35 @@
+     else:
+         valid = data.startswith(b"\xff\xd8\xff")
+     require(valid, "MEDIA_INVALID_FORMAT", "文件头与声明类型不符", 415)
++    if kind == "AVATAR":
++        require(len(data) <= 2 * 1024 * 1024, "MEDIA_TOO_LARGE", "头像最大 2 MB", 400)
++        try:
++            with tempfile.NamedTemporaryFile() as temp:
++                temp.write(data)
++                temp.flush()
++                result = subprocess.run(
++                    [ffprobe_bin, "-v", "error", "-show_streams", "-of", "json", temp.name],
++                    capture_output=True,
++                    timeout=10,
++                    check=True,
++                )
++                streams = json.loads(result.stdout).get("streams", [])
++            require(
++                len(streams) == 1
++                and streams[0].get("codec_name") in ("png", "mjpeg")
++                and 0 < streams[0].get("width", 0) <= 2048
++                and 0 < streams[0].get("height", 0) <= 2048,
++                "MEDIA_INVALID_FORMAT",
++                "头像须为不超过 2048×2048 的 PNG 或 JPEG",
++                415,
++            )
++        except OSError as exc:
++            raise BusinessError(
++                "MEDIA_PROCESSOR_UNAVAILABLE", "头像处理服务暂不可用，请联系管理员", 503
++            ) from exc
++        except (subprocess.SubprocessError, ValueError, KeyError, TypeError) as exc:
++            raise BusinessError("MEDIA_INVALID_FORMAT", "无法解码头像图片", 415) from exc
++        return None
+     if kind not in ("AUDIO", "VIDEO", "SESSION_AUDIO", "SESSION_VIDEO"):
+         return None
+     if mime in ("audio/wav", "audio/x-wav"):
+@@ -142,10 +172,12 @@
+     def upload(self, data, resume=False):
+         kind = "RESUME" if resume else data.media_type
+         IdentityService(self.rt, self.db, self.uid).require_consents("PRIVACY", "TERMS")
++        if kind == "AVATAR":
++            require(data.size <= 2 * 1024 * 1024, "MEDIA_TOO_LARGE", "头像最大 2 MB")
+         session_recording = kind in ("SESSION_AUDIO", "SESSION_VIDEO", "SESSION_CAPTIONS")
+         if session_recording:
+             IdentityService(self.rt, self.db, self.uid).require_consents(
+-                "MICROPHONE", *(["CAMERA", "SCREEN_CAPTURE"] if kind == "SESSION_VIDEO" else [])
++                "MICROPHONE", *(["CAMERA"] if kind == "SESSION_VIDEO" else [])
+             )
+             require(
+                 data.interview_id and data.duration_ms,
+@@ -220,18 +252,27 @@
+             mime_type=data.content_type,
+             size_bytes=data.size,
+             duration_ms=data.duration_ms,
+-            object_key=f"{self.rt.settings.environment}/users/{self.uid}/{kind.lower()}/{asset_id}{ext}",
++            object_key=(
++                f"ai-interview/user/{self.uid}/incoming/{asset_id}{ext}"
++                if self.rt.settings.storage_backend == "oss"
++                else f"{self.rt.settings.environment}/users/{self.uid}/{kind.lower()}/{asset_id}{ext}"
++            ),
+             expires_at=utcnow() + timedelta(days=self.rt.settings.media_retention_days),
+         )
+         self.db.add(row)
+         self.db.flush()
++        cloud = self.rt.settings.storage_backend == "oss"
+         result = {
+             "asset_id": row.id,
+-            "upload_url": self.rt.storage.url(row, "upload"),
+-            "method": "PUT",
++            "upload_url": f"/api/v1/storage/sts-token?asset_id={row.id}"
++            if cloud
++            else self.rt.storage.url(row, "upload"),
++            "method": "OSS_STS" if cloud else "PUT",
+             "headers": {"Content-Type": row.mime_type},
+             "expires_in": self.rt.settings.upload_url_seconds,
+         }
++        if cloud:
++            result.update(storage_backend="oss", object_key=row.object_key)
+         if kind == "RESUME":
+             parsed = ResumeAsset(user_id=self.uid, asset_id=row.id)
+             self.db.add(parsed)
+@@ -255,7 +296,9 @@
+             415,
+         )
+         require(not data.etag or data.etag.strip('"') == head["etag"], "MEDIA_ETAG_MISMATCH", "ETag 不一致")
+-        content = self.rt.storage.read(row.object_key)
++        reader = getattr(self.rt.storage, "read_version", None)
++        content = reader(row.object_key, head["etag"]) if reader else self.rt.storage.read(row.object_key)
++        require(len(content) == row.size_bytes, "MEDIA_SIZE_MISMATCH", "上传文件内容大小发生变化")
+         digest = hashlib.sha256(content).hexdigest()
+         require(
+             not data.checksum or data.checksum.lower() == digest, "MEDIA_CHECKSUM_MISMATCH", "SHA256 不一致"
+diff --git a/app/modules/media/storage_status.py b/app/modules/media/storage_status.py
+new file mode 100644
+--- /dev/null
++++ b/app/modules/media/storage_status.py
+@@ -0,0 +1,40 @@
++"""Storage configuration and opt-in connectivity checks without exposing credentials."""
++
++from app.core.errors import BusinessError
++from app.infrastructure.storage.oss_storage import OSSStorage
++
++
++def storage_status(runtime, probe=False):
++    settings = runtime.settings
++    configured = bool(
++        settings.aliyun_access_key_id and settings.aliyun_access_key_secret and settings.aliyun_ram_role_arn
++    )
++    result = {
++        "active_backend": settings.storage_backend,
++        "oss_configured": configured,
++        "bucket": settings.oss_bucket_name,
++        "region": settings.oss_region,
++        "endpoint": settings.oss_endpoint,
++        "role_arn": settings.aliyun_ram_role_arn,
++        "sts": "not_checked",
++        "private_bucket": "not_checked",
++    }
++    if not probe:
++        return result
++    if not configured:
++        return {
++            **result,
++            "error_code": "OSS_NOT_CONFIGURED",
++            "message": "请在后端环境配置 RAM 密钥和角色 ARN",
++        }
++    cloud = OSSStorage(settings, runtime.security, runtime.cache)
++    try:
++        cloud.sts.server()
++        result["sts"] = "ok"
++        cloud.check_ready()
++        result["private_bucket"] = "ok"
++        result["message"] = "STS 签发和私有 Bucket 检查通过；浏览器上传仍需配置 CORS"
++    except BusinessError as exc:
++        result.update(error_code=exc.code, message=exc.message)
++        result["private_bucket" if result["sts"] == "ok" else "sts"] = "error"
++    return result
+diff --git a/app/modules/privacy/service.py b/app/modules/privacy/service.py
+--- a/app/modules/privacy/service.py
++++ b/app/modules/privacy/service.py
+@@ -1,7 +1,8 @@
+-from sqlalchemy import delete, select, update
++from sqlalchemy import delete, or_, select, update
+ 
+ from app.core.security import new_id, utcnow
+ from app.db.entitlement_models import CreditBalance
++from app.db.growth_models import EmailChallenge, UserAccount
+ from app.db.models import (
+     Consent,
+     Feedback,
+@@ -87,6 +88,17 @@
+             if task.status in ("PENDING", "RUNNING", "RETRYING", "QUEUED"):
+                 task.status = "CANCELLED"
+         self.db.execute(update(CreditBalance).where(CreditBalance.user_id == self.uid).values(remaining=0))
++        account = self.db.scalar(select(UserAccount).where(UserAccount.user_id == self.uid))
++        if account:
++            conditions = [EmailChallenge.user_id == self.uid]
++            if account.email_hash:
++                conditions.append(EmailChallenge.email_hash == account.email_hash)
++            self.db.execute(delete(EmailChallenge).where(or_(*conditions)))
++            account.email_hash = None
++            account.email_encrypted = account.phone_encrypted = account.password_hash = (
++                account.avatar_asset_id
++            ) = None
++            account.auth_version += 1
+         user = self.db.get(User, self.uid)
+         user.nickname, user.openid_hash, user.status, user.credits = "[已删除]", new_id(), "DELETED", 0
+         self.audit("USER_DATA_DELETED", user.id)
+diff --git a/app/modules/report/service.py b/app/modules/report/service.py
+--- a/app/modules/report/service.py
++++ b/app/modules/report/service.py
+@@ -67,7 +67,6 @@
+             # Arithmetic is deterministic; derive the total from validated dimensions
+             # rather than rejecting otherwise valid feedback for a model math error.
+             data["overall_score"] = expected
+-
+ 
+         segments, current, size = [], [], 0
+         for turn in usable:
+diff --git a/app/providers/mail.py b/app/providers/mail.py
+new file mode 100644
+--- /dev/null
++++ b/app/providers/mail.py
+@@ -0,0 +1,40 @@
++"""SMTP email verification with an explicitly labelled, non-production preview mode."""
++
++import smtplib
++import ssl
++from email.message import EmailMessage
++
++from app.core.errors import BusinessError, require
++
++
++def deliver_code(settings, email, code, purpose):
++    require(settings.mail_mode != "disabled", "EMAIL_NOT_CONFIGURED", "邮件服务未配置", 503)
++    if settings.mail_mode == "preview":
++        require(
++            settings.environment != "production",
++            "EMAIL_NOT_CONFIGURED",
++            "生产环境必须配置 SMTP 邮件服务",
++            503,
++        )
++        return {"delivery": "development_preview", "development_code": code}
++    require(settings.smtp_host and settings.smtp_from, "EMAIL_NOT_CONFIGURED", "SMTP 邮件服务未配置", 503)
++    message = EmailMessage()
++    message["From"] = settings.smtp_from
++    message["To"] = email
++    message["Subject"] = "面试序章 · 邮箱验证码"
++    label = {"REGISTER": "注册", "RESET_PASSWORD": "重置密码", "BIND_EMAIL": "绑定或换绑邮箱"}[purpose]
++    message.set_content(
++        f"你正在{label}，验证码为 {code}，10 分钟内有效。请勿将验证码提供给他人。如非本人操作，请忽略此邮件。"
++    )
++    try:
++        cls = smtplib.SMTP_SSL if settings.smtp_use_ssl else smtplib.SMTP
++        kwargs = {"context": ssl.create_default_context()} if settings.smtp_use_ssl else {}
++        with cls(settings.smtp_host, settings.smtp_port, timeout=12, **kwargs) as connection:
++            if not settings.smtp_use_ssl and settings.smtp_starttls:
++                connection.starttls(context=ssl.create_default_context())
++            if settings.smtp_username:
++                connection.login(settings.smtp_username, settings.smtp_password)
++            connection.send_message(message)
++    except (OSError, smtplib.SMTPException) as error:
++        raise BusinessError("EMAIL_SEND_FAILED", "邮件暂时发送失败，请稍后重试", 503) from error
++    return {"delivery": "smtp"}
+diff --git a/app/runtime.py b/app/runtime.py
+--- a/app/runtime.py
++++ b/app/runtime.py
+@@ -12,6 +12,7 @@
+ from app.core.security import Security, utcnow
+ from app.db.models import AICallLog
+ from app.db.repository import Database
++from app.infrastructure.storage.oss_storage import OSSStorage
+ from app.providers.ai import HTTPProvider, MockProvider, backoff
+ from app.providers.compatible import CompatibleProvider
+ from app.providers.storage import LocalStorage, S3Storage
+@@ -27,8 +28,12 @@
+         self.security = Security(self.settings)
+         self.db = Database(self.settings)
+         self.cache = Cache(self.settings)
+-        self.storage = (S3Storage if self.settings.storage_backend == "s3" else LocalStorage)(
+-            self.settings, self.security
++        self.storage = (
++            OSSStorage(self.settings, self.security, self.cache)
++            if self.settings.storage_backend == "oss"
++            else (S3Storage if self.settings.storage_backend == "s3" else LocalStorage)(
++                self.settings, self.security
++            )
+         )
+         self.provider = (
+             MockProvider()
+diff --git a/app/schemas/accounts.py b/app/schemas/accounts.py
+new file mode 100644
+--- /dev/null
++++ b/app/schemas/accounts.py
+@@ -0,0 +1,71 @@
++import re
++from typing import Literal, Optional
++
++from pydantic import Field, field_validator
++
++from app.schemas.contracts import DTO
++
++
++class EmailInput(DTO):
++    email: str = Field(min_length=3, max_length=254)
++
++    @field_validator("email")
++    @classmethod
++    def email_address(cls, value):
++        value = value.strip().lower()
++        if not re.fullmatch(
++            r"[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,63}", value
++        ):
++            raise ValueError("请输入有效邮箱地址")
++        return value
++
++
++class EmailCodeInput(EmailInput):
++    purpose: Literal["REGISTER", "RESET_PASSWORD"] = "REGISTER"
++
++
++class EmailProof(EmailInput):
++    challenge_id: str = Field(min_length=1, max_length=36)
++    code: str = Field(pattern=r"^\d{6}$")
++
++
++class EmailRegister(EmailProof):
++    password: str = Field(min_length=10, max_length=128)
++    nickname: str = Field("面试练习者", min_length=1, max_length=80)
++    invite_code: Optional[str] = Field(None, max_length=24)
++    promotion_code: Optional[str] = Field(None, max_length=24)
++    agreed: Literal[True]
++
++
++class EmailLogin(EmailInput):
++    password: str = Field(min_length=1, max_length=128)
++
++
++class PasswordReset(EmailProof):
++    new_password: str = Field(min_length=10, max_length=128)
++
++
++class EmailBinding(EmailProof):
++    current_password: Optional[str] = Field(None, max_length=128)
++    new_password: Optional[str] = Field(None, min_length=10, max_length=128)
++
++
++class PasswordChange(DTO):
++    current_password: str = Field(min_length=1, max_length=128)
++    new_password: str = Field(min_length=10, max_length=128)
++
++
++class AvatarInput(DTO):
++    asset_id: str = Field(min_length=1, max_length=36)
++
++
++class ContactInput(DTO):
++    phone: str = Field("", max_length=24, pattern=r"^\+?[0-9 ()-]{0,24}$")
++
++    @field_validator("phone")
++    @classmethod
++    def phone_length(cls, value):
++        value = value.strip()
++        if value and not 7 <= len(re.sub(r"\D", "", value)) <= 15:
++            raise ValueError("请输入有效联系手机号")
++        return value
+diff --git a/app/schemas/contracts.py b/app/schemas/contracts.py
+--- a/app/schemas/contracts.py
++++ b/app/schemas/contracts.py
+@@ -66,7 +66,7 @@
+     content_type: Text = Field(max_length=120)
+     size: int = Field(ge=1, le=512 * 1024 * 1024)
+     media_type: Literal[
+-        "AUDIO", "VIDEO", "RESUME", "JD_IMAGE", "SESSION_AUDIO", "SESSION_VIDEO", "SESSION_CAPTIONS"
++        "AUDIO", "VIDEO", "RESUME", "JD_IMAGE", "AVATAR", "SESSION_AUDIO", "SESSION_VIDEO", "SESSION_CAPTIONS"
+     ] = "AUDIO"
+     interview_id: Optional[str] = None
+     turn_id: Optional[str] = None
+diff --git a/app/schemas/growth.py b/app/schemas/growth.py
+new file mode 100644
+--- /dev/null
++++ b/app/schemas/growth.py
+@@ -0,0 +1,27 @@
++from typing import Literal
++
++from pydantic import Field, model_validator
++
++from app.schemas.admin import ModeCredits, Reason
++
++
++class InvitationConfigInput(Reason):
++    enabled: bool = True
++    threshold: int = Field(3, ge=1, le=10000)
++    inviter_rewards: ModeCredits
++    invitee_rewards: ModeCredits
++
++    @model_validator(mode="after")
++    def reward_limits(self):
++        inviter = sum(self.inviter_rewards.model_dump().values())
++        invitee = sum(self.invitee_rewards.model_dump().values())
++        if inviter > 10000 or invitee > 10000 or (self.enabled and inviter < 1):
++            raise ValueError("邀请奖励合计须为 1 至 10000 次，新人奖励可为 0 次")
++        return self
++
++
++class PromotionInput(Reason):
++    name: str = Field(min_length=1, max_length=100)
++    promoter_name: str = Field(min_length=1, max_length=100)
++    rate_bps: int = Field(ge=0, le=10000)
++    status: Literal["ACTIVE", "DISABLED"] = "ACTIVE"
+diff --git a/docs/accounts-growth.md b/docs/accounts-growth.md
+new file mode 100644
+--- /dev/null
++++ b/docs/accounts-growth.md
+@@ -0,0 +1,57 @@
++# 邮箱账号、邀请奖励与推广分佣
++
++注册使用邮箱验证码并设置至少 10 位的密码，之后使用邮箱和密码登录。手机号与第三方登录按最新需求暂缓；联系手机号仅作为未认证的可选资料。
++
++## 邮件配置
++
++开发/测试默认 `MAIL_MODE=preview`，响应带 `development_code`，页面明确显示“本地邮件预览，未发送真实邮件”。正式邮箱验证应配置：
++
++```dotenv
++MAIL_MODE=smtp
++SMTP_HOST=smtp.example.com
++SMTP_PORT=587
++SMTP_USERNAME=your-smtp-user
++SMTP_PASSWORD=your-smtp-password
++SMTP_FROM=noreply@example.com
++SMTP_USE_SSL=false
++SMTP_STARTTLS=true
++WEB_BASE_URL=https://your-web.example.com
++```
++
++使用 SSL 端口时设置 `SMTP_USE_SSL=true` 与对应端口。生产环境要求 SMTP、加密连接与 HTTPS Web 地址，不允许返回预览验证码。邮件由服务端 SMTP 发送，浏览器不接触 SMTP 密码。不要将真实密码提交到仓库。
++
++验证码有效期 10 分钟；同一邮箱 60 秒内不可重复发送，每小时最多 5 次，来源 IP 每小时最多 20 次。验证码最多校验 5 次，与用途、目标邮箱及绑定操作账号关联，一次性消费。错误次数通过 Redis（生产必需）保留，不能通过失败请求回滚绕过。
++
++账号将邮箱 HMAC 用于唯一查询，加密保存邮箱和联系手机号，密码保存 scrypt 散列。邮箱换绑需当前密码及新邮箱验证码；首次绑定需同时设置登录密码。改密、重置密码及换绑邮箱递增会话版本，旧令牌失效，操作响应返回新令牌。
++
++## 主要接口
++
++- `POST /auth/email-code`：邮箱及 `purpose=REGISTER/RESET_PASSWORD`。
++- `POST /auth/email-register`：邮箱、密码、验证码、challenge_id、agreed=true；可带 invite_code / promotion_code。
++- `POST /auth/email-login`：邮箱和密码。
++- `POST /auth/password-reset`：邮箱验证码和新密码。
++- `POST /users/me/email-code`、`POST /users/me/email`：已登录账号绑定/换绑邮箱。
++- `POST /users/me/password`：当前密码和新密码。
++- `PATCH /users/me/avatar`：已完成校验且归属本人的 AVATAR 资产 ID。头像支持 PNG/JPEG，限制 2 MB 与 2048×2048；Web 自动裁为 256×256 JPEG。
++- `PATCH /users/me/contact`：可选联系手机号，返回 phone_verified=false。
++- `GET /invitations/me`：个人邀请码、分享链接、当前规则、有效邀请和奖励次数。仅提供匿名邀请记录，不公开好友邮箱。
++
++## 邀请奖励
++
++后台“推广中心 → 邀请奖励配置”设置每邀请 N 人奖励一次，以及邀请人、受邀人各自的 TEXT/VOICE/VIDEO 组合。默认每 3 人奖励邀请人 1 次文字面试，受邀人注册额外获 1 次文字面试。好友必须验证邮箱并成功注册；同一个注册账号不重复计数、重复发奖。奖励直接发到分类权益余额并记账。
++
++配置发布为新版本，仅对之后注册的好友生效。每个邀请人、配置版本和里程碑有唯一约束；注册及奖励在同一事务执行。配置关闭时保留邀请记录，不发新奖励；已发放奖励保留。
++
++## 推广分佣
++
++后台“推广中心 → 分佣推广链接”填写活动、推广人、佣金比例和链接状态。比例单位基点，100=1%，允许 0 至 10000。受邀新账号注册时固定推广归因，已有账号不能通过打开链接改写归因。
++
++订单创建时固化推广链接和比例；之后修改比例不影响已创建订单。支付成功时按 `实付金额（分）× 基点 ÷ 10000` 向下取整计提，每单仅一条佣金。全额退款成功同步冲销，重复支付/退款不重复计提或冲销。台账显示已计提与已冲销，保留订单快照，不执行真实转账或提现。
++
++停用链接停止新的注册归因，已归因账号未来订单仍按创建订单时的当前比例计算。当前真实支付仍未接入，开发环境的模拟支付会走相同事务链路。
++
++## 迁移与验证
++
++迁移版本 `c83f5a7e0203`，使用 `alembic upgrade head`；独立增量 SQL 为 `docs/sql/update_accounts_growth_mysql.sql`，与 Alembic 二选一。所有新表和字段均有中文数据库注释；不改变历史通用权益与已有面试记录。
++
++后端可运行 `pytest` 与 `ruff check app tests scripts alembic`。Web 的 `scripts/verify_growth.py` 会创建临时 SQLite、预览邮箱服务和模拟支付，执行真实 HTTP/Chrome 账号与分佣流程，并可联测管理后台，结束后清理实例和临时数据。
+diff --git a/docs/oss-cors.xml b/docs/oss-cors.xml
+new file mode 100644
+--- /dev/null
++++ b/docs/oss-cors.xml
+@@ -0,0 +1,18 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<CORSConfiguration>
++  <CORSRule>
++    <AllowedOrigin>http://127.0.0.1:5173</AllowedOrigin>
++    <AllowedOrigin>http://localhost:5173</AllowedOrigin>
++    <AllowedOrigin>http://127.0.0.1:5174</AllowedOrigin>
++    <AllowedOrigin>http://localhost:5174</AllowedOrigin>
++    <AllowedMethod>GET</AllowedMethod>
++    <AllowedMethod>HEAD</AllowedMethod>
++    <AllowedMethod>PUT</AllowedMethod>
++    <AllowedMethod>POST</AllowedMethod>
++    <AllowedMethod>DELETE</AllowedMethod>
++    <AllowedHeader>*</AllowedHeader>
++    <ExposeHeader>ETag</ExposeHeader>
++    <ExposeHeader>x-oss-request-id</ExposeHeader>
++    <MaxAgeSeconds>3600</MaxAgeSeconds>
++  </CORSRule>
++</CORSConfiguration>
+diff --git a/docs/oss-role-policy.json b/docs/oss-role-policy.json
+new file mode 100644
+--- /dev/null
++++ b/docs/oss-role-policy.json
+@@ -0,0 +1,15 @@
++{
++  "Version": "1",
++  "Statement": [
++    {
++      "Effect": "Allow",
++      "Action": ["oss:GetBucketAcl"],
++      "Resource": ["acs:oss:*:*:ai-interview-storage"]
++    },
++    {
++      "Effect": "Allow",
++      "Action": ["oss:GetObject", "oss:PutObject", "oss:DeleteObject", "oss:AbortMultipartUpload", "oss:ListParts"],
++      "Resource": ["acs:oss:*:*:ai-interview-storage/ai-interview/user/*"]
++    }
++  ]
++}
+diff --git a/docs/oss-storage.md b/docs/oss-storage.md
+new file mode 100644
+--- /dev/null
++++ b/docs/oss-storage.md
+@@ -0,0 +1,50 @@
++# 阿里云 OSS 接入
++
++后端的 `STORAGE_BACKEND=oss` 将头像、简历、单轮回答、整场录音录像、字幕及面试官语音保存至私有 OSS。客户端复用原上传接口，上传票据为 `OSS_STS` 时加载 `ali-oss`；8 MB 及以上使用 4 MB 分片、三片并发，上传期间刷新临时凭证。完成后仍须调用媒体确认接口，由后端检查类型、大小、内容、SHA256 及音视频时长。
++
++## 配置与授权
++
++长期密钥只存后端未提交的 `.env`，不要填入 Web/后台环境变量或源码。
++
++```dotenv
++STORAGE_BACKEND=oss
++ALIYUN_ACCESS_KEY_ID=<RAM 用户密钥>
++ALIYUN_ACCESS_KEY_SECRET=<RAM 用户密钥>
++ALIYUN_RAM_ROLE_ARN=acs:ram::1250815808607228:role/ai-interview-oss-role
++OSS_BUCKET_NAME=ai-interview-storage
++OSS_ENDPOINT=https://oss-cn-hangzhou.aliyuncs.com
++OSS_REGION=cn-hangzhou
++OSS_STS_ENDPOINT=sts.cn-hangzhou.aliyuncs.com
++OSS_STS_DURATION_SECONDS=3600
++```
++
++在 RAM 中将 [oss-role-policy.json](oss-role-policy.json) 作为自定义权限策略绑定到角色 `ai-interview-oss-role`。这是角色的 OSS 权限，不能只给 RAM 用户绑定 `AliyunSTSAssumeRoleAccess`。RAM 用户只需能对这个角色执行 `sts:AssumeRole`，角色信任策略须允许该用户扮演。Bucket 须存在于正确账号与地域，访问权限设为私有；跨账号 Bucket 还需 Bucket Policy 授权。
++
++`docs/oss-cors.xml` 提供本地 Web/后台的精确 Origin 及分片上传所需方法和响应头。可在 OSS 控制台「数据安全 → 跨域设置」按此填写；生产请添加实际 HTTPS 域名，协议、主机及端口必须匹配。CORS 不授予 RAM 权限。建议配置「未完成分片上传」的生命周期清理规则，避免网络中断留下的分片长期占用存储；业务文件的删除/过期仍由既有任务执行。
++
++## 现有接口
++
++1. `POST /api/v1/media/upload-url`（简历用 `/resumes/upload-url`）返回 `asset_id`、`method=OSS_STS` 和后端指定的 `object_key`。
++2. 使用当前 JWT 请求 `GET /api/v1/storage/sts-token?asset_id=...`。服务端核验 owner、状态、有效期及隐私/设备授权，禁止指定 user_id 或任意上传路径。响应禁止缓存，仅包含短期凭证与这一个资产的上传路径。
++3. 客户端将文件上传至 `ai-interview/user/{真实用户ID}/incoming/{资产ID}.{后缀}`。Session Policy 只允许该对象的写入与分片操作，不允许读取、列举、删除已接受文件或跨用户上传。
++4. `POST /api/v1/media/{asset_id}/complete` 校验文件后，以源 ETag 为条件复制到 `accepted/`，再删除 incoming 对象。重用尚未过期的上传凭证无法覆盖已经接受的内容。完成接口重复调用返回同一资产。
++5. 用户回放/下载、头像、简历解析和后台审阅经原授权接口获取短期签名 GET URL；后台审阅仍需支持授权、质检范围及审计，链接最长 120 秒。链接本身属于临时访问凭证，不写业务日志。
++
++旧本地文件继续使用原签名接口，不自动搬迁。切换前请保留原 `STORAGE_PATH`。已经写入 OSS 后不要直接切回 local：应先迁移对象并更新资产路径，避免新云文件不可读。
++
++## 验证与启用
++
++```sh
++uv sync --frozen --extra dev
++.venv/bin/python -B scripts/check_oss.py
++.venv/bin/python -B scripts/check_oss.py --write-probe
++# 两项成功并配置浏览器 CORS 后，设置 STORAGE_BACKEND=oss。
++# 已运行的 API/Worker/Beat 须先优雅停止，再用以下命令启动。
++.venv/bin/python -m scripts.start_local
++```
++
++`check_oss.py` 从当前后端 `.env` 读取配置，可在 active backend 为 local 时先测试。`--write-probe` 只上传脚本生成的随机测试文本，测试完整读写、条件复制与删除，并清理这些测试对象，不上传真实用户文件。默认只检查 STS 和私有 Bucket。管理后台「系统管理 → 文件存储 → 检查 OSS 连接」可随时检查，页面不会显示密钥；此检查不代替浏览器上传、对象读写与 CORS 验收。
++
++`OSS_AUTH_UNAVAILABLE` 表示 STS/角色扮演未通过或网络不可用；`OSS_ACCESS_DENIED` 表示当前角色无法执行 Bucket/对象操作；`OSS_BUCKET_NOT_PRIVATE` 表示 Bucket 不是私有。不要为消除错误把 Bucket 改为公共读。
++
++参考：[浏览器 STS 上传](https://www.alibabacloud.com/help/en/oss/developer-reference/authorize-access-6)、[权限判定顺序](https://www.alibabacloud.com/help/en/oss/user-guide/authentication)、[跨域配置](https://www.alibabacloud.com/help/en/oss/developer-reference/introduction-1)。
+diff --git a/docs/sql/ai_interview_mysql.sql b/docs/sql/ai_interview_mysql.sql
+--- a/docs/sql/ai_interview_mysql.sql
++++ b/docs/sql/ai_interview_mysql.sql
+@@ -1,5 +1,5 @@
+ -- AI 模拟面试服务：MySQL 8.4 全新建库 SQL（含中文表注释和全部字段注释）
+--- 当前结构对应 Alembic 版本 b72e4f6d9102，包含 31 张业务表和 1 张迁移版本表。
++-- 当前结构对应 Alembic 版本 c83f5a7e0203，包含 40 张业务表和 1 张迁移版本表。
+ -- 仅在空数据库中执行；已有数据库请使用 alembic upgrade head；不要直接执行本建库 SQL。
+ -- 不包含业务数据或凭证；ID、状态及时间等 ORM 客户端默认值由应用写入。
+ -- 示例：mysql --default-character-set=utf8mb4 -h 127.0.0.1 -u root AI_Interview < docs/sql/ai_interview_mysql.sql
+@@ -150,6 +150,20 @@
+ 
+ CREATE INDEX ix_audit_logs_user_id ON audit_logs (user_id);
+ 
++CREATE TABLE email_challenges (
++    id VARCHAR(36) NOT NULL COMMENT '记录唯一标识（UUID）',
++    created_at DATETIME(6) NOT NULL COMMENT '创建时间（UTC）',
++    updated_at DATETIME(6) NOT NULL COMMENT '最后变更时间（UTC）',
++    user_id VARCHAR(36) COMMENT '绑定邮箱的操作用户 ID；注册或找回密码时为空',
++    email_hash VARCHAR(64) NOT NULL COMMENT '验证码目标邮箱 HMAC',
++    purpose VARCHAR(24) NOT NULL COMMENT '用途：REGISTER/RESET_PASSWORD/BIND_EMAIL',
++    code_hash VARCHAR(64) NOT NULL COMMENT '验证码 HMAC，不保存或记录明文验证码',
++    expires_at DATETIME(6) NOT NULL COMMENT '验证码过期时间（UTC）',
++    used_at DATETIME(6) COMMENT '成功消费时间（UTC）；空表示未使用',
++    PRIMARY KEY (id),
++    FOREIGN KEY(user_id) REFERENCES users (id)
++)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='邮箱验证码挑战，限定用途、收件人、有效期和一次性消费' COLLATE utf8mb4_0900_bin;
++
+ CREATE TABLE idempotency_records (
+     user_id VARCHAR(36) NOT NULL COMMENT '所属用户 ID，关联 users.id，用于数据归属校验',
+     scope VARCHAR(200) NOT NULL COMMENT '幂等操作范围，区分创建面试、提交回答、结束、订单等操作',
+@@ -176,6 +190,33 @@
+     CONSTRAINT ck_credit_balance_nonnegative CHECK (remaining >= 0),
+     FOREIGN KEY(user_id) REFERENCES users (id)
+ )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='按文字、语音、视频分别管理可用面试次数；旧通用次数继续存储于 users.credits' COLLATE utf8mb4_0900_bin;
++
++CREATE TABLE invitation_codes (
++    id VARCHAR(36) NOT NULL COMMENT '记录唯一标识（UUID）',
++    created_at DATETIME(6) NOT NULL COMMENT '创建时间（UTC）',
++    updated_at DATETIME(6) NOT NULL COMMENT '最后变更时间（UTC）',
++    user_id VARCHAR(36) NOT NULL COMMENT '邀请人用户 ID',
++    code VARCHAR(24) NOT NULL COMMENT '公开邀请码，大小写规范化',
++    PRIMARY KEY (id),
++    UNIQUE (user_id),
++    FOREIGN KEY(user_id) REFERENCES users (id),
++    UNIQUE (code)
++)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='每个用户唯一的邀请码；注册归因后不可重绑邀请人' COLLATE utf8mb4_0900_bin;
++
++CREATE TABLE invitation_configs (
++    id VARCHAR(36) NOT NULL COMMENT '记录唯一标识（UUID）',
++    created_at DATETIME(6) NOT NULL COMMENT '创建时间（UTC）',
++    updated_at DATETIME(6) NOT NULL COMMENT '最后变更时间（UTC）',
++    version INTEGER NOT NULL COMMENT '配置版本号，递增且唯一',
++    enabled BOOL NOT NULL COMMENT '是否启用邀请奖励',
++    threshold INTEGER NOT NULL COMMENT '邀请人每累计多少名有效新注册用户获得一次奖励，单位人',
++    inviter_rewards JSON NOT NULL COMMENT '邀请人每达门槛发放的 TEXT/VOICE/VIDEO 次数组合',
++    invitee_rewards JSON NOT NULL COMMENT '受邀人成功注册额外发放的 TEXT/VOICE/VIDEO 次数组合',
++    created_by VARCHAR(36) NOT NULL COMMENT '发布配置的管理员 ID',
++    PRIMARY KEY (id),
++    UNIQUE (version),
++    FOREIGN KEY(created_by) REFERENCES admin_users (id)
++)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='邀请活动配置版本；新版本仅影响之后验证邮箱并注册的用户' COLLATE utf8mb4_0900_bin;
+ 
+ CREATE TABLE job_profiles (
+     user_id VARCHAR(36) NOT NULL COMMENT '所属用户 ID，关联 users.id，用于数据归属校验',
+@@ -263,6 +304,21 @@
+ 
+ CREATE INDEX ix_product_skus_created_at ON product_skus (created_at);
+ 
++CREATE TABLE promotion_links (
++    id VARCHAR(36) NOT NULL COMMENT '记录唯一标识（UUID）',
++    created_at DATETIME(6) NOT NULL COMMENT '创建时间（UTC）',
++    updated_at DATETIME(6) NOT NULL COMMENT '最后变更时间（UTC）',
++    code VARCHAR(24) NOT NULL COMMENT '公开推广码，唯一',
++    name VARCHAR(100) NOT NULL COMMENT '推广活动名称',
++    promoter_name VARCHAR(100) NOT NULL COMMENT '推广合作方或推广人名称',
++    rate_bps INTEGER NOT NULL COMMENT '佣金比例，单位基点；100表示百分之一，范围0至10000',
++    status VARCHAR(16) NOT NULL COMMENT '链接状态：ACTIVE=可用于新注册，DISABLED=停止新注册归因',
++    created_by VARCHAR(36) NOT NULL COMMENT '创建推广链接的管理员 ID',
++    PRIMARY KEY (id),
++    UNIQUE (code),
++    FOREIGN KEY(created_by) REFERENCES admin_users (id)
++)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='管理后台创建的分佣推广链接及佣金配置' COLLATE utf8mb4_0900_bin;
++
+ CREATE TABLE reconciliation_batches (
+     id VARCHAR(36) NOT NULL COMMENT '记录唯一标识（UUID）',
+     created_at DATETIME(6) NOT NULL COMMENT '创建时间（UTC）',
+@@ -278,6 +334,24 @@
+ )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='导入渠道账单后与业务订单核对，不伪造渠道拉单' COLLATE utf8mb4_0900_bin;
+ 
+ CREATE INDEX ix_reconciliation_batches_created_at ON reconciliation_batches (created_at);
++
++CREATE TABLE referral_registrations (
++    id VARCHAR(36) NOT NULL COMMENT '记录唯一标识（UUID）',
++    created_at DATETIME(6) NOT NULL COMMENT '创建时间（UTC）',
++    updated_at DATETIME(6) NOT NULL COMMENT '最后变更时间（UTC）',
++    invitee_id VARCHAR(36) NOT NULL COMMENT '验证邮箱并成功注册的受邀用户 ID',
++    inviter_id VARCHAR(36) NOT NULL COMMENT '邀请人用户 ID',
++    config_version INTEGER NOT NULL COMMENT '注册时邀请规则版本，0表示系统默认版本',
++    threshold INTEGER NOT NULL COMMENT '注册时门槛快照，单位人',
++    inviter_rewards JSON NOT NULL COMMENT '注册时邀请人奖励次数组合快照',
++    invitee_rewards JSON NOT NULL COMMENT '注册时受邀人奖励次数组合快照',
++    PRIMARY KEY (id),
++    UNIQUE (invitee_id),
++    FOREIGN KEY(invitee_id) REFERENCES users (id),
++    FOREIGN KEY(inviter_id) REFERENCES users (id)
++)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='有效邀请注册记录；一名新用户仅归因一次，规则取注册时配置快照' COLLATE utf8mb4_0900_bin;
++
++CREATE INDEX ix_referral_inviter_version ON referral_registrations (inviter_id, config_version);
+ 
+ CREATE TABLE user_consents (
+     user_id VARCHAR(36) NOT NULL COMMENT '所属用户 ID，关联 users.id，用于数据归属校验',
+@@ -337,6 +411,34 @@
+ 
+ CREATE INDEX ix_order_product_snapshots_created_at ON order_product_snapshots (created_at);
+ 
++CREATE TABLE promotion_attributions (
++    id VARCHAR(36) NOT NULL COMMENT '记录唯一标识（UUID）',
++    created_at DATETIME(6) NOT NULL COMMENT '创建时间（UTC）',
++    updated_at DATETIME(6) NOT NULL COMMENT '最后变更时间（UTC）',
++    user_id VARCHAR(36) NOT NULL COMMENT '被推广注册的用户 ID',
++    link_id VARCHAR(36) NOT NULL COMMENT '推广链接 ID',
++    PRIMARY KEY (id),
++    UNIQUE (user_id),
++    FOREIGN KEY(user_id) REFERENCES users (id),
++    FOREIGN KEY(link_id) REFERENCES promotion_links (id)
++)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='新注册用户的推广归因，账号唯一且不能在购买时改写' COLLATE utf8mb4_0900_bin;
++
++CREATE TABLE promotion_commissions (
++    id VARCHAR(36) NOT NULL COMMENT '记录唯一标识（UUID）',
++    created_at DATETIME(6) NOT NULL COMMENT '创建时间（UTC）',
++    updated_at DATETIME(6) NOT NULL COMMENT '最后变更时间（UTC）',
++    order_id VARCHAR(36) NOT NULL COMMENT '产生佣金的订单 ID',
++    link_id VARCHAR(36) NOT NULL COMMENT '归属推广链接 ID',
++    rate_bps INTEGER NOT NULL COMMENT '订单创建时固化的佣金比例（基点）',
++    amount_minor INTEGER NOT NULL COMMENT '佣金金额（人民币分），按订单实付乘比例向下取整',
++    status VARCHAR(16) NOT NULL COMMENT '应计状态：ACCRUED=已计提，REVERSED=退款已冲销',
++    reversed_at DATETIME(6) COMMENT '退款冲销时间（UTC）',
++    PRIMARY KEY (id),
++    UNIQUE (order_id),
++    FOREIGN KEY(order_id) REFERENCES orders (id),
++    FOREIGN KEY(link_id) REFERENCES promotion_links (id)
++)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='订单分佣应计台账；订单唯一，退款冲销，不执行真实转账' COLLATE utf8mb4_0900_bin;
++
+ CREATE TABLE reconciliation_items (
+     id VARCHAR(36) NOT NULL COMMENT '记录唯一标识（UUID）',
+     created_at DATETIME(6) NOT NULL COMMENT '创建时间（UTC）',
+@@ -542,6 +644,20 @@
+ 
+ CREATE INDEX ix_ai_call_logs_user_id ON ai_call_logs (user_id);
+ 
++CREATE TABLE invitation_rewards (
++    id VARCHAR(36) NOT NULL COMMENT '记录唯一标识（UUID）',
++    created_at DATETIME(6) NOT NULL COMMENT '创建时间（UTC）',
++    updated_at DATETIME(6) NOT NULL COMMENT '最后变更时间（UTC）',
++    inviter_id VARCHAR(36) NOT NULL COMMENT '获得奖励的邀请人 ID',
++    config_version INTEGER NOT NULL COMMENT '活动配置版本',
++    milestone INTEGER NOT NULL COMMENT '已达到的第几个门槛，从 1 递增',
++    usage_id VARCHAR(36) NOT NULL COMMENT '实际奖励权益流水 ID',
++    PRIMARY KEY (id),
++    CONSTRAINT uq_invitation_reward_milestone UNIQUE (inviter_id, config_version, milestone),
++    FOREIGN KEY(inviter_id) REFERENCES users (id),
++    FOREIGN KEY(usage_id) REFERENCES usage_ledger (id)
++)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='邀请人每个配置版本的里程碑奖励，唯一键防止重复发放' COLLATE utf8mb4_0900_bin;
++
+ CREATE TABLE resume_assets (
+     user_id VARCHAR(36) NOT NULL COMMENT '所属用户 ID，关联 users.id，用于数据归属校验',
+     asset_id VARCHAR(36) NOT NULL COMMENT '简历原始文件资产 ID，关联 media_assets.id，一份文件对应一份解析记录',
+@@ -572,6 +688,24 @@
+     FOREIGN KEY(usage_id) REFERENCES usage_ledger (id)
+ )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='权益流水的类型分配明细，保证取消、重试及退款使用原始类型；历史无明细流水视为通用次数' COLLATE utf8mb4_0900_bin;
+ 
++CREATE TABLE user_accounts (
++    id VARCHAR(36) NOT NULL COMMENT '记录唯一标识（UUID）',
++    created_at DATETIME(6) NOT NULL COMMENT '创建时间（UTC）',
++    updated_at DATETIME(6) NOT NULL COMMENT '最后变更时间（UTC）',
++    user_id VARCHAR(36) NOT NULL COMMENT '用户 ID，关联 users.id',
++    email_hash VARCHAR(64) COMMENT '规范化邮箱的 HMAC，唯一查找键；不保存明文邮箱',
++    email_encrypted LONGTEXT COMMENT '加密的已验证邮箱地址',
++    password_hash VARCHAR(256) COMMENT 'scrypt 密码散列，含随机盐；不保存明文密码',
++    auth_version INTEGER NOT NULL COMMENT '用户会话版本；改密和换绑后递增，使旧令牌失效' DEFAULT '0',
++    avatar_asset_id VARCHAR(36) COMMENT '已验证的头像媒体资产 ID',
++    phone_encrypted LONGTEXT COMMENT '可选联系手机号（加密）；仅联系信息，未认证且不用于登录',
++    PRIMARY KEY (id),
++    UNIQUE (user_id),
++    FOREIGN KEY(user_id) REFERENCES users (id),
++    UNIQUE (email_hash),
++    FOREIGN KEY(avatar_asset_id) REFERENCES media_assets (id)
++)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='用户邮箱账号、安全凭证与资料扩展；关联既有业务用户' COLLATE utf8mb4_0900_bin;
++
+ ALTER TABLE interviews ADD CONSTRAINT fk_interview_resume FOREIGN KEY(resume_asset_id) REFERENCES resume_assets (id);
+ 
+ ALTER TABLE media_assets ADD CONSTRAINT fk_media_turn FOREIGN KEY(turn_id) REFERENCES interview_turns (id);
+@@ -580,4 +714,4 @@
+ 
+ ALTER TABLE interview_turns ADD CONSTRAINT fk_turn_tts FOREIGN KEY(question_asset_id) REFERENCES media_assets (id);
+ 
+-INSERT INTO alembic_version (version_num) VALUES ('b72e4f6d9102');
++INSERT INTO alembic_version (version_num) VALUES ('c83f5a7e0203');
+diff --git a/docs/sql/update_accounts_growth_mysql.sql b/docs/sql/update_accounts_growth_mysql.sql
+new file mode 100644
+--- /dev/null
++++ b/docs/sql/update_accounts_growth_mysql.sql
+@@ -0,0 +1,148 @@
++-- 邮箱账号、邀请奖励、推广分佣增量迁移；适用于 b72e4f6d9102。与 alembic upgrade head 二选一。
++-- Running upgrade b72e4f6d9102 -> c83f5a7e0203
++
++CREATE TABLE email_challenges (
++    id VARCHAR(36) NOT NULL COMMENT '记录唯一标识（UUID）',
++    created_at DATETIME(6) NOT NULL COMMENT '创建时间（UTC）',
++    updated_at DATETIME(6) NOT NULL COMMENT '最后变更时间（UTC）',
++    user_id VARCHAR(36) COMMENT '绑定邮箱的操作用户 ID；注册或找回密码时为空',
++    email_hash VARCHAR(64) NOT NULL COMMENT '验证码目标邮箱 HMAC',
++    purpose VARCHAR(24) NOT NULL COMMENT '用途：REGISTER/RESET_PASSWORD/BIND_EMAIL',
++    code_hash VARCHAR(64) NOT NULL COMMENT '验证码 HMAC，不保存或记录明文验证码',
++    expires_at DATETIME(6) NOT NULL COMMENT '验证码过期时间（UTC）',
++    used_at DATETIME(6) COMMENT '成功消费时间（UTC）；空表示未使用',
++    PRIMARY KEY (id),
++    FOREIGN KEY(user_id) REFERENCES users (id)
++)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='邮箱验证码挑战，限定用途、收件人、有效期和一次性消费' COLLATE utf8mb4_0900_bin;
++
++CREATE TABLE invitation_codes (
++    id VARCHAR(36) NOT NULL COMMENT '记录唯一标识（UUID）',
++    created_at DATETIME(6) NOT NULL COMMENT '创建时间（UTC）',
++    updated_at DATETIME(6) NOT NULL COMMENT '最后变更时间（UTC）',
++    user_id VARCHAR(36) NOT NULL COMMENT '邀请人用户 ID',
++    code VARCHAR(24) NOT NULL COMMENT '公开邀请码，大小写规范化',
++    PRIMARY KEY (id),
++    UNIQUE (code),
++    UNIQUE (user_id),
++    FOREIGN KEY(user_id) REFERENCES users (id),
++    UNIQUE (user_id),
++    UNIQUE (code)
++)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='每个用户唯一的邀请码；注册归因后不可重绑邀请人' COLLATE utf8mb4_0900_bin;
++
++CREATE TABLE invitation_configs (
++    id VARCHAR(36) NOT NULL COMMENT '记录唯一标识（UUID）',
++    created_at DATETIME(6) NOT NULL COMMENT '创建时间（UTC）',
++    updated_at DATETIME(6) NOT NULL COMMENT '最后变更时间（UTC）',
++    version INTEGER NOT NULL COMMENT '配置版本号，递增且唯一',
++    enabled BOOL NOT NULL COMMENT '是否启用邀请奖励',
++    threshold INTEGER NOT NULL COMMENT '邀请人每累计多少名有效新注册用户获得一次奖励，单位人',
++    inviter_rewards JSON NOT NULL COMMENT '邀请人每达门槛发放的 TEXT/VOICE/VIDEO 次数组合',
++    invitee_rewards JSON NOT NULL COMMENT '受邀人成功注册额外发放的 TEXT/VOICE/VIDEO 次数组合',
++    created_by VARCHAR(36) NOT NULL COMMENT '发布配置的管理员 ID',
++    PRIMARY KEY (id),
++    UNIQUE (version),
++    FOREIGN KEY(created_by) REFERENCES admin_users (id),
++    UNIQUE (version)
++)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='邀请活动配置版本；新版本仅影响之后验证邮箱并注册的用户' COLLATE utf8mb4_0900_bin;
++
++CREATE TABLE invitation_rewards (
++    id VARCHAR(36) NOT NULL COMMENT '记录唯一标识（UUID）',
++    created_at DATETIME(6) NOT NULL COMMENT '创建时间（UTC）',
++    updated_at DATETIME(6) NOT NULL COMMENT '最后变更时间（UTC）',
++    inviter_id VARCHAR(36) NOT NULL COMMENT '获得奖励的邀请人 ID',
++    config_version INTEGER NOT NULL COMMENT '活动配置版本',
++    milestone INTEGER NOT NULL COMMENT '已达到的第几个门槛，从 1 递增',
++    usage_id VARCHAR(36) NOT NULL COMMENT '实际奖励权益流水 ID',
++    PRIMARY KEY (id),
++    CONSTRAINT uq_invitation_reward_milestone UNIQUE (inviter_id, config_version, milestone),
++    FOREIGN KEY(usage_id) REFERENCES usage_ledger (id),
++    FOREIGN KEY(inviter_id) REFERENCES users (id)
++)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='邀请人每个配置版本的里程碑奖励，唯一键防止重复发放' COLLATE utf8mb4_0900_bin;
++
++CREATE TABLE promotion_links (
++    id VARCHAR(36) NOT NULL COMMENT '记录唯一标识（UUID）',
++    created_at DATETIME(6) NOT NULL COMMENT '创建时间（UTC）',
++    updated_at DATETIME(6) NOT NULL COMMENT '最后变更时间（UTC）',
++    code VARCHAR(24) NOT NULL COMMENT '公开推广码，唯一',
++    name VARCHAR(100) NOT NULL COMMENT '推广活动名称',
++    promoter_name VARCHAR(100) NOT NULL COMMENT '推广合作方或推广人名称',
++    rate_bps INTEGER NOT NULL COMMENT '佣金比例，单位基点；100表示百分之一，范围0至10000',
++    status VARCHAR(16) NOT NULL COMMENT '链接状态：ACTIVE=可用于新注册，DISABLED=停止新注册归因',
++    created_by VARCHAR(36) NOT NULL COMMENT '创建推广链接的管理员 ID',
++    PRIMARY KEY (id),
++    UNIQUE (code),
++    FOREIGN KEY(created_by) REFERENCES admin_users (id),
++    UNIQUE (code)
++)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='管理后台创建的分佣推广链接及佣金配置' COLLATE utf8mb4_0900_bin;
++
++CREATE TABLE referral_registrations (
++    id VARCHAR(36) NOT NULL COMMENT '记录唯一标识（UUID）',
++    created_at DATETIME(6) NOT NULL COMMENT '创建时间（UTC）',
++    updated_at DATETIME(6) NOT NULL COMMENT '最后变更时间（UTC）',
++    invitee_id VARCHAR(36) NOT NULL COMMENT '验证邮箱并成功注册的受邀用户 ID',
++    inviter_id VARCHAR(36) NOT NULL COMMENT '邀请人用户 ID',
++    config_version INTEGER NOT NULL COMMENT '注册时邀请规则版本，0表示系统默认版本',
++    threshold INTEGER NOT NULL COMMENT '注册时门槛快照，单位人',
++    inviter_rewards JSON NOT NULL COMMENT '注册时邀请人奖励次数组合快照',
++    invitee_rewards JSON NOT NULL COMMENT '注册时受邀人奖励次数组合快照',
++    PRIMARY KEY (id),
++    UNIQUE (invitee_id),
++    FOREIGN KEY(invitee_id) REFERENCES users (id),
++    FOREIGN KEY(inviter_id) REFERENCES users (id),
++    UNIQUE (invitee_id)
++)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='有效邀请注册记录；一名新用户仅归因一次，规则取注册时配置快照' COLLATE utf8mb4_0900_bin;
++
++CREATE INDEX ix_referral_inviter_version ON referral_registrations (inviter_id, config_version);
++
++CREATE TABLE user_accounts (
++    id VARCHAR(36) NOT NULL COMMENT '记录唯一标识（UUID）',
++    created_at DATETIME(6) NOT NULL COMMENT '创建时间（UTC）',
++    updated_at DATETIME(6) NOT NULL COMMENT '最后变更时间（UTC）',
++    user_id VARCHAR(36) NOT NULL COMMENT '用户 ID，关联 users.id',
++    email_hash VARCHAR(64) COMMENT '规范化邮箱的 HMAC，唯一查找键；不保存明文邮箱',
++    email_encrypted LONGTEXT COMMENT '加密的已验证邮箱地址',
++    password_hash VARCHAR(256) COMMENT 'scrypt 密码散列，含随机盐；不保存明文密码',
++    auth_version INTEGER NOT NULL COMMENT '用户会话版本；改密和换绑后递增，使旧令牌失效' DEFAULT '0',
++    avatar_asset_id VARCHAR(36) COMMENT '已验证的头像媒体资产 ID',
++    phone_encrypted LONGTEXT COMMENT '可选联系手机号（加密）；仅联系信息，未认证且不用于登录',
++    PRIMARY KEY (id),
++    UNIQUE (email_hash),
++    UNIQUE (user_id),
++    FOREIGN KEY(user_id) REFERENCES users (id),
++    FOREIGN KEY(avatar_asset_id) REFERENCES media_assets (id),
++    UNIQUE (user_id),
++    UNIQUE (email_hash)
++)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='用户邮箱账号、安全凭证与资料扩展；关联既有业务用户' COLLATE utf8mb4_0900_bin;
++
++CREATE TABLE promotion_attributions (
++    id VARCHAR(36) NOT NULL COMMENT '记录唯一标识（UUID）',
++    created_at DATETIME(6) NOT NULL COMMENT '创建时间（UTC）',
++    updated_at DATETIME(6) NOT NULL COMMENT '最后变更时间（UTC）',
++    user_id VARCHAR(36) NOT NULL COMMENT '被推广注册的用户 ID',
++    link_id VARCHAR(36) NOT NULL COMMENT '推广链接 ID',
++    PRIMARY KEY (id),
++    UNIQUE (user_id),
++    FOREIGN KEY(link_id) REFERENCES promotion_links (id),
++    FOREIGN KEY(user_id) REFERENCES users (id),
++    UNIQUE (user_id)
++)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='新注册用户的推广归因，账号唯一且不能在购买时改写' COLLATE utf8mb4_0900_bin;
++
++CREATE TABLE promotion_commissions (
++    id VARCHAR(36) NOT NULL COMMENT '记录唯一标识（UUID）',
++    created_at DATETIME(6) NOT NULL COMMENT '创建时间（UTC）',
++    updated_at DATETIME(6) NOT NULL COMMENT '最后变更时间（UTC）',
++    order_id VARCHAR(36) NOT NULL COMMENT '产生佣金的订单 ID',
++    link_id VARCHAR(36) NOT NULL COMMENT '归属推广链接 ID',
++    rate_bps INTEGER NOT NULL COMMENT '订单创建时固化的佣金比例（基点）',
++    amount_minor INTEGER NOT NULL COMMENT '佣金金额（人民币分），按订单实付乘比例向下取整',
++    status VARCHAR(16) NOT NULL COMMENT '应计状态：ACCRUED=已计提，REVERSED=退款已冲销',
++    reversed_at DATETIME(6) COMMENT '退款冲销时间（UTC）',
++    PRIMARY KEY (id),
++    UNIQUE (order_id),
++    FOREIGN KEY(link_id) REFERENCES promotion_links (id),
++    FOREIGN KEY(order_id) REFERENCES orders (id),
++    UNIQUE (order_id)
++)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='订单分佣应计台账；订单唯一，退款冲销，不执行真实转账' COLLATE utf8mb4_0900_bin;
++
++UPDATE alembic_version SET version_num='c83f5a7e0203' WHERE alembic_version.version_num = 'b72e4f6d9102';
++
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,7 +10,8 @@
+   "PyMySQL[rsa]>=1.1,<2", "redis>=5,<8", "celery>=5.4,<5.7",
+   "boto3>=1.35,<2", "cryptography>=44,<47", "PyJWT>=2.9,<3",
+   "httpx>=0.27,<0.29", "dashscope>=1.27.5,<2", "pypdf>=5,<7", "python-docx>=1.1,<2",
+-  "python-multipart>=0.0.18,<0.1"
++  "python-multipart>=0.0.18,<0.1", "python-dotenv>=1,<2",
++  "oss2>=2.19,<3", "aliyun-python-sdk-core>=2.16,<3"
+ ]
+ 
+ [project.optional-dependencies]
+diff --git a/scripts/check_oss.py b/scripts/check_oss.py
+new file mode 100644
+--- /dev/null
++++ b/scripts/check_oss.py
+@@ -0,0 +1,82 @@
++"""Opt-in OSS connectivity probe; never prints keys, tokens or signed URLs."""
++
++import argparse
++import hashlib
++import sys
++import uuid
++from pathlib import Path
++from types import SimpleNamespace
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++
++from app.core.cache import Cache  # noqa: E402
++from app.core.config import Settings  # noqa: E402
++from app.core.errors import BusinessError  # noqa: E402
++from app.core.security import Security  # noqa: E402
++from app.infrastructure.storage.oss_storage import OSSStorage  # noqa: E402
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument(
++        "--write-probe", action="store_true", help="Upload only generated probe text and clean it up"
++    )
++    args = parser.parse_args()
++    keys = []
++    cloud = None
++    try:
++        settings = Settings(storage_backend="oss")
++        cloud = OSSStorage(settings, Security(settings), Cache(settings))
++        cloud.sts.server()
++        print("STS: OK", flush=True)
++        cloud.check_ready()
++        print("Private bucket: OK", flush=True)
++        if args.write_probe:
++            uid = "connectivity-check"
++            key = f"ai-interview/user/{uid}/incoming/{uuid.uuid4().hex}.txt"
++            keys.extend([key, key.replace("/incoming/", "/accepted/", 1)])
++            content = ("ai-interview synthetic connectivity probe " + uuid.uuid4().hex).encode()
++            credentials = cloud.sts.upload(uid, key)
++            import oss2
++            from oss2.credentials import StaticCredentialsProvider
++
++            client = oss2.Bucket(
++                oss2.ProviderAuthV4(
++                    StaticCredentialsProvider(
++                        credentials["access_key_id"],
++                        credentials["access_key_secret"],
++                        credentials["security_token"],
++                    )
++                ),
++                settings.oss_endpoint,
++                settings.oss_bucket_name,
++                region=settings.oss_region,
++                connect_timeout=10,
++            )
++            cloud._run(lambda: client.put_object(key, content, headers={"Content-Type": "text/plain"}))
++            head = cloud.head(key)
++            if head["size"] != len(content) or cloud.read_version(key, head["etag"]) != content:
++                raise BusinessError("OSS_PROBE_MISMATCH", "OSS 测试内容不一致", 503)
++            accepted = cloud.finalize(SimpleNamespace(object_key=key), head["etag"])
++            if hashlib.sha256(cloud.read(accepted)).digest() != hashlib.sha256(content).digest():
++                raise BusinessError("OSS_PROBE_MISMATCH", "OSS 测试内容不一致", 503)
++            print("Scoped upload / read / conditional copy: OK", flush=True)
++        return 0
++    except BusinessError as exc:
++        print(f"FAILED: {exc.code} — {exc.message}", flush=True)
++        return 1
++    except Exception as exc:
++        # SDK exception text can contain an AccessKey ID or a signed request.
++        print(f"FAILED: {type(exc).__name__}; check backend OSS configuration/network", flush=True)
++        return 1
++    finally:
++        if cloud and keys:
++            for key in keys:
++                try:
++                    cloud.delete(key)
++                except Exception:
++                    print("Probe cleanup failed; check the connectivity-check object prefix", flush=True)
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tests/test_email_accounts.py b/tests/test_email_accounts.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_email_accounts.py
+@@ -0,0 +1,231 @@
++from datetime import timedelta
++
++from sqlalchemy import select
++
++from app.core.security import utcnow
++from app.db.growth_models import EmailChallenge, UserAccount
++from tests.conftest import data, login
++
++PASSWORD = "Strong-email-password-2026"
++
++
++def email_code(client, email, purpose="REGISTER", headers=None):
++    response = client.post(
++        "/api/v1/users/me/email-code" if headers else "/api/v1/auth/email-code",
++        headers=headers,
++        json={"email": email, **({} if headers else {"purpose": purpose})},
++    )
++    return data(response)
++
++
++def register_email(client, email="person@example.com", **extra):
++    code = email_code(client, email)
++    body = {
++        "email": email,
++        "password": PASSWORD,
++        "challenge_id": code["challenge_id"],
++        "code": code["development_code"],
++        "nickname": "邮箱练习者",
++        "agreed": True,
++        **extra,
++    }
++    result = data(client.post("/api/v1/auth/email-register", json=body), 201)
++    return {"Authorization": "Bearer " + result["access_token"]}, result, body
++
++
++def test_email_registration_login_and_password_session_revocation(client):
++    headers, result, body = register_email(client)
++    assert result["user"]["email"] == "person@example.com"
++    assert result["user"]["has_password"]
++    assert data(client.get("/api/v1/users/me", headers=headers))["id"] == result["user"]["id"]
++    assert client.post("/api/v1/auth/email-register", json=body).status_code == 409
++    signed = data(
++        client.post("/api/v1/auth/email-login", json={"email": "PERSON@EXAMPLE.COM", "password": PASSWORD})
++    )
++    assert signed["user"]["id"] == result["user"]["id"]
++    assert (
++        client.post(
++            "/api/v1/auth/email-login", json={"email": body["email"], "password": "wrong"}
++        ).status_code
++        == 401
++    )
++    changed = data(
++        client.post(
++            "/api/v1/users/me/password",
++            headers=headers,
++            json={"current_password": PASSWORD, "new_password": "New-secure-password-2026"},
++        )
++    )
++    assert client.get("/api/v1/users/me", headers=headers).status_code == 401
++    assert (
++        client.get(
++            "/api/v1/users/me", headers={"Authorization": "Bearer " + changed["access_token"]}
++        ).status_code
++        == 200
++    )
++    assert (
++        client.post(
++            "/api/v1/auth/email-login", json={"email": body["email"], "password": PASSWORD}
++        ).status_code
++        == 401
++    )
++    assert (
++        client.post(
++            "/api/v1/auth/email-login", json={"email": body["email"], "password": "New-secure-password-2026"}
++        ).status_code
++        == 200
++    )
++    with client.app.state.runtime.db.session() as db:
++        account = db.scalar(select(UserAccount).where(UserAccount.user_id == result["user"]["id"]))
++        assert PASSWORD not in account.password_hash and body["email"] not in account.email_encrypted
++
++
++def test_codes_cannot_cross_email_or_purpose_and_failures_remain_limited(client):
++    code = email_code(client, "one@example.com")
++    body = {
++        "email": "two@example.com",
++        "password": PASSWORD,
++        "challenge_id": code["challenge_id"],
++        "code": code["development_code"],
++        "agreed": True,
++    }
++    assert client.post("/api/v1/auth/email-register", json=body).status_code == 400
++    body["email"] = "one@example.com"
++    body["code"] = "000000" if code["development_code"] != "000000" else "111111"
++    for _ in range(4):
++        assert client.post("/api/v1/auth/email-register", json=body).status_code == 400
++    body["code"] = code["development_code"]
++    assert client.post("/api/v1/auth/email-register", json=body).status_code == 429
++    assert client.post("/api/v1/auth/email-code", json={"email": "one@example.com"}).status_code == 429
++    other = email_code(client, "other@example.com", "RESET_PASSWORD")
++    body.update(email="other@example.com", challenge_id=other["challenge_id"], code=other["development_code"])
++    assert client.post("/api/v1/auth/email-register", json=body).status_code == 400
++
++
++def test_expired_code_and_weak_password_are_rejected(client):
++    code = email_code(client, "expired@example.com")
++    with client.app.state.runtime.db.session() as db:
++        db.get(EmailChallenge, code["challenge_id"]).expires_at = utcnow() - timedelta(seconds=1)
++    payload = {
++        "email": "expired@example.com",
++        "password": PASSWORD,
++        "code": code["development_code"],
++        "challenge_id": code["challenge_id"],
++        "agreed": True,
++    }
++    assert client.post("/api/v1/auth/email-register", json=payload).status_code == 400
++    assert (
++        client.post("/api/v1/auth/email-register", json={**payload, "password": "short"}).status_code == 422
++    )
++
++
++def test_legacy_account_binding_email_and_changing_email_keeps_business_owner(client):
++    headers, uid = login(client)
++    code = email_code(client, "bound@example.com", headers=headers)
++    result = data(
++        client.post(
++            "/api/v1/users/me/email",
++            headers=headers,
++            json={
++                "email": "bound@example.com",
++                "code": code["development_code"],
++                "challenge_id": code["challenge_id"],
++                "new_password": PASSWORD,
++            },
++        )
++    )
++    assert result["user"]["id"] == uid
++    updated = {"Authorization": "Bearer " + result["access_token"]}
++    assert client.get("/api/v1/users/me", headers=headers).status_code == 401
++    assert data(client.get("/api/v1/users/me", headers=updated))["email"] == "bound@example.com"
++    next_code = email_code(client, "new@example.com", headers=updated)
++    payload = {
++        "email": "new@example.com",
++        "code": next_code["development_code"],
++        "challenge_id": next_code["challenge_id"],
++        "current_password": "bad",
++    }
++    assert client.post("/api/v1/users/me/email", headers=updated, json=payload).status_code == 401
++    payload["current_password"] = PASSWORD
++    next_result = data(client.post("/api/v1/users/me/email", headers=updated, json=payload))
++    assert next_result["user"]["email"] == "new@example.com" and next_result["user"]["id"] == uid
++    assert (
++        client.post(
++            "/api/v1/auth/email-login", json={"email": "bound@example.com", "password": PASSWORD}
++        ).status_code
++        == 401
++    )
++
++
++def test_password_reset_requires_email_proof_and_revokes_previous_sessions(client):
++    headers, result, _ = register_email(client)
++    # Registration and recovery have a shared resend cooldown; advance this isolated test past it.
++    client.app.state.runtime.cache.local.clear()
++    code = email_code(client, "person@example.com", "RESET_PASSWORD")
++    response = data(
++        client.post(
++            "/api/v1/auth/password-reset",
++            json={
++                "email": "person@example.com",
++                "code": code["development_code"],
++                "challenge_id": code["challenge_id"],
++                "new_password": "Reset-password-2026",
++            },
++        )
++    )
++    assert response["user"]["id"] == result["user"]["id"]
++    assert client.get("/api/v1/users/me", headers=headers).status_code == 401
++    assert (
++        client.post(
++            "/api/v1/auth/email-login",
++            json={"email": "person@example.com", "password": "Reset-password-2026"},
++        ).status_code
++        == 200
++    )
++
++
++def test_smtp_delivery_returns_no_preview_code(client, monkeypatch):
++    messages = []
++
++    class SMTP:
++        def __init__(self, *args, **kwargs):
++            pass
++
++        def __enter__(self):
++            return self
++
++        def __exit__(self, *args):
++            pass
++
++        def starttls(self, **kwargs):
++            pass
++
++        def send_message(self, message):
++            messages.append(message)
++
++    monkeypatch.setattr("app.providers.mail.smtplib.SMTP", SMTP)
++    settings = client.app.state.runtime.settings
++    settings.mail_mode = "smtp"
++    settings.smtp_host = "smtp.example.com"
++    settings.smtp_from = "noreply@example.com"
++    result = data(client.post("/api/v1/auth/email-code", json={"email": "recipient@example.com"}))
++    assert result["delivery"] == "smtp" and "development_code" not in result
++    assert len(messages) == 1 and messages[0]["To"] == "recipient@example.com"
++
++
++def test_production_refuses_preview_email_codes(client):
++    client.app.state.runtime.settings.environment = "production"
++    response = client.post("/api/v1/auth/email-code", json={"email": "recipient@example.com"})
++    assert response.status_code == 503
++    assert "development_code" not in response.text
++
++
++def test_account_deletion_erases_email_credentials_and_contact_details(client):
++    headers, result, _ = register_email(client)
++    data(client.patch("/api/v1/users/me/contact", headers=headers, json={"phone": "13800138000"}))
++    data(client.delete("/api/v1/users/me/data", headers=headers), 202)
++    assert client.get("/api/v1/users/me", headers=headers).status_code == 401
++    with client.app.state.runtime.db.session() as db:
++        account = db.scalar(select(UserAccount).where(UserAccount.user_id == result["user"]["id"]))
++        assert account.email_hash is None and account.email_encrypted is None
++        assert account.password_hash is None and account.phone_encrypted is None
+diff --git a/tests/test_growth.py b/tests/test_growth.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_growth.py
+@@ -0,0 +1,86 @@
++from sqlalchemy import func, select
++
++from app.db.growth_models import InvitationReward, PromotionCommission, ReferralRegistration
++from tests.conftest import data, login
++from tests.test_admin import admin_login
++from tests.test_email_accounts import register_email
++
++
++def test_invitation_configuration_grants_typed_rewards_only_at_each_threshold(client):
++    inviter, uid = login(client, "inviter")
++    admin, _ = admin_login(client)
++    config = {
++        "enabled": True,
++        "threshold": 2,
++        "inviter_rewards": {"TEXT": 2, "VOICE": 1, "VIDEO": 0},
++        "invitee_rewards": {"TEXT": 0, "VOICE": 1, "VIDEO": 0},
++        "reason": "配置邀请奖励验证规则",
++    }
++    saved = data(client.put("/api/v1/admin/invitations/config", headers=admin, json=config))
++    assert saved["version"] == 1
++    invitation = data(client.get("/api/v1/invitations/me", headers=inviter))
++    assert data(client.get("/api/v1/invitations/me", headers=inviter))["code"] == invitation["code"]
++    for index in range(4):
++        invited, result, body = register_email(
++            client, f"invited{index}@example.com", invite_code=invitation["code"]
++        )
++        assert result["user"]["interview_credits"] == {"TEXT": 0, "VOICE": 1, "VIDEO": 0}
++        assert client.post("/api/v1/auth/email-register", json=body).status_code == 409
++        current = data(client.get("/api/v1/billing/entitlements", headers=inviter))
++        assert current["interview_credits"]["TEXT"] == ((index + 1) // 2) * 2
++        assert current["interview_credits"]["VOICE"] == (index + 1) // 2
++    dashboard = data(client.get("/api/v1/invitations/me", headers=inviter))
++    assert dashboard["valid_invites"] == 4 and dashboard["reward_count"] == 2
++    with client.app.state.runtime.db.session() as db:
++        assert db.scalar(select(func.count()).select_from(ReferralRegistration)) == 4
++        assert db.scalar(select(func.count()).select_from(InvitationReward)) == 2
++
++
++def test_promotion_order_rate_snapshot_commission_idempotency_and_refund_reversal(client):
++    admin, _ = admin_login(client)
++    payload = {
++        "name": "面试训练推广",
++        "promoter_name": "合作推广人",
++        "rate_bps": 1250,
++        "status": "ACTIVE",
++        "reason": "建立分佣推广链接",
++    }
++    promotion = data(client.post("/api/v1/admin/promotions", headers=admin, json=payload), 201)
++    buyer, result, _ = register_email(client, "buyer@example.com", promotion_code=promotion["code"])
++    order = data(
++        client.post(
++            "/api/v1/billing/orders",
++            headers={**buyer, "Idempotency-Key": "purchase"},
++            json={"product_code": "SINGLE"},
++        )
++    )
++    data(
++        client.put(
++            f"/api/v1/admin/promotions/{promotion['id']}",
++            headers={**admin, "Idempotency-Key": "update-rate"},
++            json={**payload, "rate_bps": 5000},
++        )
++    )
++    for key in ("pay", "pay-again"):
++        data(
++            client.post(
++                f"/api/v1/billing/orders/{order['id']}/dev-pay", headers={**buyer, "Idempotency-Key": key}
++            )
++        )
++    commissions = data(client.get("/api/v1/admin/promotions/commissions/records", headers=admin))
++    assert commissions["total"] == 1 and commissions["items"][0]["amount_minor"] == 123
++    assert commissions["items"][0]["rate_bps"] == 1250
++    data(
++        client.post(
++            f"/api/v1/billing/orders/{order['id']}/refund", headers={**buyer, "Idempotency-Key": "refund"}
++        )
++    )
++    current = data(client.get("/api/v1/admin/promotions", headers=admin))["items"][0]
++    assert (
++        current["registrations"] == 1 and current["accrued_minor"] == 0 and current["reversed_minor"] == 123
++    )
++    with client.app.state.runtime.db.session() as db:
++        assert db.scalar(select(func.count()).select_from(PromotionCommission)) == 1
++        assert db.scalar(select(PromotionCommission)).status == "REVERSED"
++    support, _ = admin_login(client, "support", "SUPPORT")
++    assert client.get("/api/v1/admin/promotions", headers=support).status_code == 403
+diff --git a/tests/test_mysql_storage.py b/tests/test_mysql_storage.py
+--- a/tests/test_mysql_storage.py
++++ b/tests/test_mysql_storage.py
+@@ -59,8 +59,10 @@
+         provider_api_key="test-only-key",
+         encryption_key=Fernet.generate_key().decode(),
+         secret_key="test-production-guard-secret-32-characters",
+-        wechat_app_id="test-app-id",
+-        wechat_app_secret="test-app-secret",
++        mail_mode="smtp",
++        smtp_host="smtp.example.test",
++        smtp_from="noreply@example.test",
++        web_base_url="https://web.example.test",
+         public_base_url="https://app.example.test",
+     )
+     assert Settings(_env_file=None, **values).database_url.startswith("mysql+pymysql://")
+diff --git a/tests/test_oss_storage.py b/tests/test_oss_storage.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_oss_storage.py
+@@ -0,0 +1,201 @@
++import hashlib
++import io
++import json
++from datetime import timedelta
++from types import SimpleNamespace
++
++import oss2
++import pytest
++
++from app.core.errors import BusinessError
++from app.core.security import utcnow
++from app.db.models import MediaAsset
++from app.infrastructure.storage.oss_storage import OSSStorage
++from tests.conftest import data, login
++from tests.test_admin import admin_login
++
++IMAGE = b"\x89PNG\r\n\x1a\nsynthetic-test-content"
++
++
++def enable_oss(client, monkeypatch):
++    runtime = client.app.state.runtime
++    settings = runtime.settings
++    settings.storage_backend = "oss"
++    settings.aliyun_access_key_id = "test-long-term-id"
++    settings.aliyun_access_key_secret = "test-long-term-secret"
++    settings.aliyun_ram_role_arn = "acs:ram::1234567890123456:role/test-oss"
++    calls, objects = [], {}
++
++    class STSClient:
++        def do_action_with_exception(self, request):
++            calls.append(request.get_query_params())
++            return json.dumps(
++                {
++                    "Credentials": {
++                        "AccessKeyId": "STS.test-only-id",
++                        "AccessKeySecret": "test-temporary-secret",
++                        "SecurityToken": "test-security-token",
++                        "Expiration": (utcnow() + timedelta(hours=1)).isoformat(),
++                    }
++                }
++            ).encode()
++
++    class Bucket:
++        acl = "private"
++
++        def put_object(self, key, content, headers):
++            objects[key] = (content, headers["Content-Type"])
++
++        def head_object(self, key):
++            if key not in objects:
++                raise oss2.exceptions.NoSuchKey(404, {}, b"", {"Code": "NoSuchKey"})
++            content, mime = objects[key]
++            return SimpleNamespace(
++                content_length=len(content),
++                etag=hashlib.md5(content).hexdigest(),
++                headers={"Content-Type": mime},
++            )
++
++        def get_object(self, key, headers=None):
++            if headers:
++                assert headers["If-Match"] == self.head_object(key).etag
++            return io.BytesIO(objects[key][0])
++
++        def copy_object(self, bucket, source, destination, headers):
++            assert headers["x-oss-copy-source-if-match"] == self.head_object(source).etag
++            objects[destination] = objects[source]
++
++        def delete_object(self, key):
++            objects.pop(key, None)
++
++        def sign_url(self, method, key, seconds, **kwargs):
++            return f"https://test-bucket.oss-cn-hangzhou.aliyuncs.com/{key}?expires={seconds}&signature=test"
++
++        def get_bucket_acl(self):
++            return SimpleNamespace(acl=self.acl)
++
++    bucket = Bucket()
++    monkeypatch.setattr("app.infrastructure.storage.sts_service.AcsClient", lambda *a, **kw: STSClient())
++    monkeypatch.setattr("app.infrastructure.storage.oss_storage.oss2.Bucket", lambda *a, **kw: bucket)
++    runtime.storage = OSSStorage(settings, runtime.security, runtime.cache)
++    return runtime, calls, objects, bucket
++
++
++def ticket(client, headers, size=len(IMAGE)):
++    return data(
++        client.post(
++            "/api/v1/media/upload-url",
++            headers=headers,
++            json={
++                "filename": "sample.png",
++                "content_type": "image/png",
++                "size": size,
++                "media_type": "JD_IMAGE",
++            },
++        )
++    )
++
++
++def test_sts_requires_jwt_owner_and_consents_and_has_exact_asset_policy(client, monkeypatch):
++    owner, uid = login(client)
++    other, _ = login(client, "other")
++    runtime, calls, _, _ = enable_oss(client, monkeypatch)
++    upload = ticket(client, owner)
++    path = "/api/v1/storage/sts-token?asset_id=" + upload["asset_id"]
++    assert client.get(path).status_code == 401
++    assert client.get(path, headers=other).status_code == 404
++    assert not calls
++    response = client.get(path, headers=owner)
++    grant = data(response)
++    assert "no-store" in response.headers["Cache-Control"]
++    assert grant["object_key"] == upload["object_key"]
++    assert grant["prefix"] == f"ai-interview/user/{uid}/incoming/"
++    statement = json.loads(calls[0]["Policy"])["Statement"][0]
++    assert statement["Resource"] == [f"acs:oss:*:*:ai-interview-storage/{upload['object_key']}"]
++    assert set(statement["Action"]) == {"oss:PutObject", "oss:AbortMultipartUpload", "oss:ListParts"}
++    assert "test-long-term" not in response.text
++    assert data(client.get(path, headers=owner)) == grant
++    assert len(calls) == 1
++    assert all("test-temporary-secret" not in str(v) for v in runtime.cache.local.values())
++    data(client.delete("/api/v1/users/me/consents/PRIVACY", headers=owner))
++    assert client.get(path, headers=owner).status_code == 403
++
++
++def test_completion_validates_content_and_moves_to_immutable_accepted_key(client, monkeypatch):
++    owner, _ = login(client)
++    runtime, _, objects, bucket = enable_oss(client, monkeypatch)
++    upload = ticket(client, owner)
++    key, asset_id = upload["object_key"], upload["asset_id"]
++    complete = f"/api/v1/media/{asset_id}/complete"
++    assert client.post(complete, headers=owner, json={}).status_code == 409
++    objects[key] = (b"wrong", "image/png")
++    assert client.post(complete, headers=owner, json={}).status_code == 400
++    objects[key] = (IMAGE, "image/png")
++    assert client.post(complete, headers=owner, json={"etag": "incorrect"}).status_code == 400
++    ready = data(client.post(complete, headers=owner, json={"etag": bucket.head_object(key).etag}))
++    assert ready["status"] == "READY" and "/accepted/" in ready["download_url"]
++    assert key not in objects
++    with runtime.db.session() as db:
++        accepted = db.get(MediaAsset, asset_id).object_key
++    # Reusing an unexpired browser credential cannot replace the accepted download.
++    objects[key] = (b"replacement", "image/png")
++    assert runtime.storage.read(accepted) == IMAGE
++    assert (
++        data(client.post(complete, headers=owner, json={}))["checksum"] == hashlib.sha256(IMAGE).hexdigest()
++    )
++    assert client.get(f"/api/v1/storage/sts-token?asset_id={asset_id}", headers=owner).status_code == 409
++    assert client.get("/api/v1/media/" + asset_id, headers=owner).status_code == 200
++
++
++def test_expired_pending_assets_and_invalid_user_paths_cannot_get_sts(client, monkeypatch):
++    owner, uid = login(client)
++    runtime, calls, _, _ = enable_oss(client, monkeypatch)
++    upload = ticket(client, owner)
++    with runtime.db.session() as db:
++        db.get(MediaAsset, upload["asset_id"]).expires_at = utcnow() - timedelta(seconds=1)
++    assert client.get(upload["upload_url"], headers=owner).status_code == 409
++    for key in (
++        f"ai-interview/user/{uid}/accepted/file.png",
++        "ai-interview/user/other/incoming/x.png",
++        f"ai-interview/user/{uid}/incoming/../x",
++    ):
++        with pytest.raises(BusinessError):
++            runtime.storage.sts.upload(uid, key)
++    assert not calls
++
++
++def test_oss_keeps_preexisting_local_assets_readable_and_deletable(client, monkeypatch):
++    owner, _ = login(client)
++    runtime = client.app.state.runtime
++    old_key = "test/users/old/jd.png"
++    runtime.storage.put(old_key, IMAGE, "image/png")
++    runtime, _, _, _ = enable_oss(client, monkeypatch)
++    assert runtime.storage.read(old_key) == IMAGE
++    assert runtime.storage.head(old_key)["size"] == len(IMAGE)
++    runtime.storage.delete(old_key)
++    with pytest.raises(BusinessError, match="对象尚未上传"):
++        runtime.storage.read(old_key)
++
++
++def test_private_bucket_readiness_and_admin_diagnostics_do_not_expose_secrets(client, monkeypatch):
++    root, _ = admin_login(client)
++    finance, _ = admin_login(client, "finance", "FINANCE")
++    runtime, calls, _, bucket = enable_oss(client, monkeypatch)
++    endpoint = "/api/v1/admin/storage/status"
++    assert client.get(endpoint).status_code == 401
++    assert client.get(endpoint, headers=finance).status_code == 403
++    assert data(client.get(endpoint, headers=root))["sts"] == "not_checked"
++    assert not calls
++    result = client.get(endpoint + "?probe=true", headers=root)
++    assert data(result)["private_bucket"] == "ok"
++    assert "test-temporary-secret" not in result.text and "test-long-term" not in result.text
++    bucket.acl = "public-read"
++    assert client.get("/health/ready").status_code == 503
++    assert data(client.get(endpoint + "?probe=true", headers=root))["error_code"] == "OSS_BUCKET_NOT_PRIVATE"
++    bucket.acl = "private"
++    assert client.get("/health/ready").status_code == 200
++    with pytest.raises(BusinessError) as error:
++        runtime.storage._run(
++            lambda: (_ for _ in ()).throw(oss2.exceptions.ServerError(403, {}, b"", {"Code": "AccessDenied"}))
++        )
++    assert error.value.code == "OSS_ACCESS_DENIED"
+diff --git a/uv.lock b/uv.lock
+--- a/uv.lock
++++ b/uv.lock
+@@ -14,6 +14,7 @@
+ source = { editable = "." }
+ dependencies = [
+     { name = "alembic" },
++    { name = "aliyun-python-sdk-core" },
+     { name = "boto3", version = "1.42.97", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
+     { name = "boto3", version = "1.43.123", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+     { name = "celery" },
+@@ -21,6 +22,7 @@
+     { name = "dashscope" },
+     { name = "fastapi" },
+     { name = "httpx" },
++    { name = "oss2" },
+     { name = "pydantic", version = "2.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
+     { name = "pydantic", version = "2.14.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+     { name = "pydantic-settings", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
+@@ -30,6 +32,8 @@
+     { name = "pymysql", extra = ["rsa"] },
+     { name = "pypdf" },
+     { name = "python-docx" },
++    { name = "python-dotenv", version = "1.2.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
++    { name = "python-dotenv", version = "1.2.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+     { name = "python-multipart", version = "0.0.20", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
+     { name = "python-multipart", version = "0.0.32", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+     { name = "redis", version = "7.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
+@@ -50,6 +54,7 @@
+ [package.metadata]
+ requires-dist = [
+     { name = "alembic", specifier = ">=1.13,<1.17" },
++    { name = "aliyun-python-sdk-core", specifier = ">=2.16,<3" },
+     { name = "boto3", specifier = ">=1.35,<2" },
+     { name = "celery", specifier = ">=5.4,<5.7" },
+     { name = "cryptography", specifier = ">=44,<47" },
+@@ -57,6 +62,7 @@
+     { name = "fastapi", specifier = ">=0.121,<0.129" },
+     { name = "httpx", specifier = ">=0.27,<0.29" },
+     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13,<2" },
++    { name = "oss2", specifier = ">=2.19,<3" },
+     { name = "pydantic", specifier = ">=2.7,<3" },
+     { name = "pydantic-settings", specifier = ">=2.6,<3" },
+     { name = "pyjwt", specifier = ">=2.9,<3" },
+@@ -65,6 +71,7 @@
+     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8,<9" },
+     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5,<7" },
+     { name = "python-docx", specifier = ">=1.1,<2" },
++    { name = "python-dotenv", specifier = ">=1,<2" },
+     { name = "python-multipart", specifier = ">=0.0.18,<0.1" },
+     { name = "redis", specifier = ">=5,<8" },
+     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.11,<1" },
+@@ -451,6 +458,30 @@
+ sdist = { url = "https://files.pythonhosted.org/packages/9a/ca/4dc52902cf3491892d464f5265a81e9dff094692c8a049a3ed6a05fe7ee8/alembic-1.16.5.tar.gz", hash = "sha256:a88bb7f6e513bd4301ecf4c7f2206fe93f9913f9b48dac3b78babde2d6fe765e", size = 1969868, upload-time = "2025-08-27T18:02:05.668Z" }
+ wheels = [
+     { url = "https://files.pythonhosted.org/packages/39/4a/4c61d4c84cfd9befb6fa08a702535b27b21fff08c946bc2f6139decbf7f7/alembic-1.16.5-py3-none-any.whl", hash = "sha256:e845dfe090c5ffa7b92593ae6687c5cb1a101e91fa53868497dbd79847f9dbe3", size = 247355, upload-time = "2025-08-27T18:02:07.37Z" },
++]
++
++[[package]]
++name = "aliyun-python-sdk-core"
++version = "2.16.1"
++source = { registry = "https://pypi.org/simple" }
++dependencies = [
++    { name = "cryptography" },
++    { name = "jmespath" },
++]
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/ea/38/eb3be49159d6442e68189f21a2205a199b51ca46cf42a3f874e695ff0ba9/aliyun_python_sdk_core-2.16.1-py3-none-any.whl", hash = "sha256:0f25a6e8ec1ea29c76610278cff81cbff85149a6e692bf2398a6f9b77e5e7424", size = 521331, upload-time = "2026-08-18T07:57:56.379Z" },
++]
++
++[[package]]
++name = "aliyun-python-sdk-kms"
++version = "2.16.5"
++source = { registry = "https://pypi.org/simple" }
++dependencies = [
++    { name = "aliyun-python-sdk-core" },
++]
++sdist = { url = "https://files.pythonhosted.org/packages/a8/2c/9877d0e6b18ecf246df671ac65a5d1d9fecbf85bdcb5d43efbde0d4662eb/aliyun-python-sdk-kms-2.16.5.tar.gz", hash = "sha256:f328a8a19d83ecbb965ffce0ec1e9930755216d104638cd95ecd362753b813b3", size = 12018, upload-time = "2024-08-30T09:01:20.104Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/11/5c/0132193d7da2c735669a1ed103b142fd63c9455984d48c5a88a1a516efaa/aliyun_python_sdk_kms-2.16.5-py2.py3-none-any.whl", hash = "sha256:24b6cdc4fd161d2942619479c8d050c63ea9cd22b044fe33b60bbb60153786f0", size = 99495, upload-time = "2024-08-30T09:01:18.462Z" },
+ ]
+ 
+ [[package]]
+@@ -1563,6 +1594,12 @@
+ ]
+ 
+ [[package]]
++name = "crcmod"
++version = "1.7"
++source = { registry = "https://pypi.org/simple" }
++sdist = { url = "https://files.pythonhosted.org/packages/6b/b0/e595ce2a2527e169c3bcd6c33d2473c1918e0b7f6826a043ca1245dd4e5b/crcmod-1.7.tar.gz", hash = "sha256:dc7051a0db5f2bd48665a990d3ec1cc305a466a77358ca4492826f41f283601e", size = 89670, upload-time = "2010-06-27T14:35:29.538Z" }
++
++[[package]]
+ name = "cryptography"
+ version = "46.0.7"
+ source = { registry = "https://pypi.org/simple" }
+@@ -3358,6 +3395,21 @@
+ ]
+ 
+ [[package]]
++name = "oss2"
++version = "2.19.1"
++source = { registry = "https://pypi.org/simple" }
++dependencies = [
++    { name = "aliyun-python-sdk-core" },
++    { name = "aliyun-python-sdk-kms" },
++    { name = "crcmod" },
++    { name = "pycryptodome" },
++    { name = "requests", version = "2.32.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
++    { name = "requests", version = "2.34.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
++    { name = "six" },
++]
++sdist = { url = "https://files.pythonhosted.org/packages/df/b5/f2cb1950dda46ac2284d6c950489fdacd0e743c2d79a347924d3cc44b86f/oss2-2.19.1.tar.gz", hash = "sha256:a8ab9ee7eb99e88a7e1382edc6ea641d219d585a7e074e3776e9dec9473e59c1", size = 298845, upload-time = "2024-10-25T11:37:46.638Z" }
++
++[[package]]
+ name = "packaging"
+ version = "26.3"
+ source = { registry = "https://pypi.org/simple" }
+@@ -3750,6 +3802,44 @@
+ sdist = { url = "https://files.pythonhosted.org/packages/cb/27/eeb9f307bf07060f3d9f9aa0fb8c15b01bdfded0a941e4b2719c7f94cacd/pycparser-3.12.tar.gz", hash = "sha256:f03387877eab82ce01bbdfd0ba7252ee55a90b1c708d5129e2ce915475cf1db6", size = 158785, upload-time = "2026-10-22T13:40:03.56Z" }
+ wheels = [
+     { url = "https://files.pythonhosted.org/packages/b6/ae/315bbeee126a769cbde43cf4908acb4b40408d8bf8bbf334dd7368d8dadf/pycparser-3.12-py3-none-any.whl", hash = "sha256:a076f3f489b39b43ed13563a1dafe42447445bec2e294154ec5c57fcdda4c85e", size = 62600, upload-time = "2026-10-22T13:40:02.021Z" },
++]
++
++[[package]]
++name = "pycryptodome"
++version = "4.3.0"
++source = { registry = "https://pypi.org/simple" }
++sdist = { url = "https://files.pythonhosted.org/packages/61/52/6bf92ead9cfcfc788d9f07f2f8dad4592b190d36ed3d26a5985bbf95ff5d/pycryptodome-4.3.0.tar.gz", hash = "sha256:663fc5e1c4a3562d00c3a9b265fb94ef5f68c6085d982638b83e713af5487c06", size = 1807722, upload-time = "2026-11-02T22:16:15.811Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/92/93/7fb75b62af22dfa3df1392472aa5c63fdfd54665e975147c62f5c3c2157f/pycryptodome-4.3.0-cp315-cp315t-macosx_10_15_universal2.whl", hash = "sha256:3ef46fd43f2a4c0b0d80387f503d13a556956e457c6df31270a4ffda0e66729c", size = 1782069, upload-time = "2026-11-02T22:15:13.166Z" },
++    { url = "https://files.pythonhosted.org/packages/ea/0a/b9d263c6290754ed5f2b4d72e7fe3a9fba2bd1b7d20060f4eaca4773f33d/pycryptodome-4.3.0-cp315-cp315t-macosx_10_15_x86_64.whl", hash = "sha256:5278d7ab512e712fb4ac1288aa4acf5136e72cb906f32ccb428c2fef678ff1b4", size = 1536024, upload-time = "2026-11-02T22:15:15.93Z" },
++    { url = "https://files.pythonhosted.org/packages/f6/26/2def69ac920a0202d90fcaf07de7c0c120fb9c45157ca473d69d0617134d/pycryptodome-4.3.0-cp315-cp315t-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:52c2fb32a447297ed600f3b019d82c68664a800d87a13a9446a1a2cf7074b2c4", size = 2508799, upload-time = "2026-11-02T22:15:17.524Z" },
++    { url = "https://files.pythonhosted.org/packages/b3/3a/e8b07dc3a9a28e69cc35e13619bba5c36afa5c61e8868eed224fc0d23e67/pycryptodome-4.3.0-cp315-cp315t-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:20d9b199c2864f32727413dae3644d794567eeeed9c8a2167e39896c28b2a671", size = 3010278, upload-time = "2026-11-02T22:15:19.513Z" },
++    { url = "https://files.pythonhosted.org/packages/fe/34/94a841087b7995cc32d8239fc68d461a7077ff2a41bf27198aad6c819add/pycryptodome-4.3.0-cp315-cp315t-musllinux_1_2_aarch64.whl", hash = "sha256:43d55fa266b5d5c661d23a9e8f9875687aff6693301a9c238b22b3b6e2fb3045", size = 2539885, upload-time = "2026-11-02T22:15:21.608Z" },
++    { url = "https://files.pythonhosted.org/packages/05/00/eb1578d00b9fad8aa9b52c5c468537094be38093ad0dcf6f5e6007359149/pycryptodome-4.3.0-cp315-cp315t-musllinux_1_2_x86_64.whl", hash = "sha256:e9adc4f6bbc6d011ad2b525bd3043641cf98b44ebd687b434c59b446dda142bd", size = 3573277, upload-time = "2026-11-02T22:15:24.194Z" },
++    { url = "https://files.pythonhosted.org/packages/aa/d1/36a4e4aa0e0bbd02ea650cd3cc12261324b8f60b441c7641286c51814593/pycryptodome-4.3.0-cp315-cp315t-win32.whl", hash = "sha256:185ff29a6fff096bc17ff7043ab659aefdcf8e0650a3b43fd150113a3083c52c", size = 1321211, upload-time = "2026-11-02T22:15:26.159Z" },
++    { url = "https://files.pythonhosted.org/packages/6d/e6/f9678fed6f68b650d54472e691159a3b9ae03e827fedb403c9344ac28573/pycryptodome-4.3.0-cp315-cp315t-win_amd64.whl", hash = "sha256:ac80c8ffe9dd8018a2871c1b8a09819757af2ca08636feefbb838e71fe384aff", size = 1704790, upload-time = "2026-11-02T22:15:28.062Z" },
++    { url = "https://files.pythonhosted.org/packages/25/ec/6232f74a392dbbc1fabf40395f089d6029ea6a32f6deb57bbbb003be9e2e/pycryptodome-4.3.0-cp315-cp315t-win_arm64.whl", hash = "sha256:72e420852034a9a6abeeb4dd445d73a34e7cd248434a38f179067bc1f5368daf", size = 1393905, upload-time = "2026-11-02T22:15:29.657Z" },
++    { url = "https://files.pythonhosted.org/packages/b4/ad/d190fc7e81cf8080ba6e13a03407ed3ec85642d25e2f4c19b27b8e300b02/pycryptodome-4.3.0-cp39-abi3-macosx_10_9_universal2.whl", hash = "sha256:a3accc029e09410ae4d9cbb08e060552e81d7fc032267afb8b4555c65301bb0f", size = 1776334, upload-time = "2026-11-02T22:15:31.579Z" },
++    { url = "https://files.pythonhosted.org/packages/98/0c/f832024cfb9ebb4b72fe567b1f46b2a1fe15fb04cc2ea6d11a3d511e42f8/pycryptodome-4.3.0-cp39-abi3-macosx_10_9_x86_64.whl", hash = "sha256:a35b24c1fbc4149041c9372b1560dc4689fe6904e998960f9cd1c403d832376b", size = 1529089, upload-time = "2026-11-02T22:15:33.617Z" },
++    { url = "https://files.pythonhosted.org/packages/f8/0d/9ccadac4042b572d17a63324cc7783f2aec46de4ac1bcc4d5b7cff151540/pycryptodome-4.3.0-cp39-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:c7e8f84d406ab75117de563a93b61ff97236cc59b5570c8c36a7ce3427f6f931", size = 2504557, upload-time = "2026-11-02T22:15:35.875Z" },
++    { url = "https://files.pythonhosted.org/packages/af/1b/b0f5f020bd43351932df9d16857330d3304715c4b1f7f783dc6e58cb7919/pycryptodome-4.3.0-cp39-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:96bf142ef25544a221a2b4a8f5d449cb07c1736be71b4ea057749318a2cd402c", size = 2996511, upload-time = "2026-11-02T22:15:37.922Z" },
++    { url = "https://files.pythonhosted.org/packages/2c/55/9e19453c09eeb4a7b76de88c5e9fd472d98011099fbdef95de9d56b284e5/pycryptodome-4.3.0-cp39-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:c7f1654f356bf688840f4fbee72fe946a2e170ee84052ded78e9897c5afbc39f", size = 2529837, upload-time = "2026-11-02T22:15:40.273Z" },
++    { url = "https://files.pythonhosted.org/packages/1e/81/b38fb897bfc2b4911df1c6a7aa1cf331ed7d380956a5ef4149fb9cdeb577/pycryptodome-4.3.0-cp39-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:ef3e17934d1b8ee437175fb9dcbf892067e197acc141545d76f37db2a79dd184", size = 3562951, upload-time = "2026-11-02T22:15:43.142Z" },
++    { url = "https://files.pythonhosted.org/packages/31/7c/352c683d124b575bd0ef49de5d284ecad60ebc8036e886f4c75898def454/pycryptodome-4.3.0-cp39-abi3-win32.whl", hash = "sha256:cfda47fd1745477c748b71bf726d2db99c184eb301c631992dd3a423760e000f", size = 1307755, upload-time = "2026-11-02T22:15:45.341Z" },
++    { url = "https://files.pythonhosted.org/packages/e1/52/7d0830ccb961c9e7224b88a60df1a4eab7fa6c5fd426d7b7c972988a4cac/pycryptodome-4.3.0-cp39-abi3-win_amd64.whl", hash = "sha256:195c9d781905605b3b9de8567c47986a9d0ee513566b5150eb9400692465b610", size = 1675134, upload-time = "2026-11-02T22:15:47.091Z" },
++    { url = "https://files.pythonhosted.org/packages/23/cc/41c1b55a420820ec4b2a23c877c4fa4330df0dc6cdaeb0dc88967d57b238/pycryptodome-4.3.0-cp39-abi3-win_arm64.whl", hash = "sha256:85ece8fd90ae325d7d519f2ac61fbcc20cf4475afaba328f0c636da6077787d3", size = 1365927, upload-time = "2026-11-02T22:15:48.794Z" },
++    { url = "https://files.pythonhosted.org/packages/67/4e/a6adec94bc5f973da7ed50080e9d3d1fe1e21f277d702466961a954d97ab/pycryptodome-4.3.0-pp310-pypy310_pp73-macosx_10_15_x86_64.whl", hash = "sha256:efbb27e3ab2fddafd7872a2426b52aa5485b492496f7f314c48e41c467b344ab", size = 1490207, upload-time = "2026-11-02T22:15:51.272Z" },
++    { url = "https://files.pythonhosted.org/packages/dc/08/ceedbed8b73aa4a1ad7c817ce9e820a67f1f54352b9b36ac62e974719fa2/pycryptodome-4.3.0-pp310-pypy310_pp73-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:c96571df32a159aac4046686a8513de849f094a854cdd522a53d03987059660b", size = 1313603, upload-time = "2026-11-02T22:15:52.972Z" },
++    { url = "https://files.pythonhosted.org/packages/74/fe/22c943bbae89d2f42e03ed42ef03c83f4e4b14c2287e8e81d1df1265bea7/pycryptodome-4.3.0-pp310-pypy310_pp73-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:632eeab406bea959193c22e7fece45bb8bd589f73fe43ba11c72651e6130f046", size = 1443883, upload-time = "2026-11-02T22:15:54.859Z" },
++    { url = "https://files.pythonhosted.org/packages/15/b2/b64847a70a5db52907ffcba8243d44cadc4601070df2014e45897f46367c/pycryptodome-4.3.0-pp310-pypy310_pp73-win_amd64.whl", hash = "sha256:ebd8b65586ed954f29fb5e67fafea63d25e428d746d07716fc4653df4348a136", size = 1678723, upload-time = "2026-11-02T22:15:56.874Z" },
++    { url = "https://files.pythonhosted.org/packages/81/60/1d28bc91e1958be6b7b0a1b05aeb761145d72d8364e7e932d66402bca245/pycryptodome-4.3.0-pp311-pypy311_pp80-macosx_10_15_x86_64.whl", hash = "sha256:5467b62cfd54c371a262874cb5784be9d2d1c2da2541e39952d0d38a8336d339", size = 1485378, upload-time = "2026-11-02T22:15:59.22Z" },
++    { url = "https://files.pythonhosted.org/packages/ea/bc/e09fb5f0ed65d8cdb76bd31e9433c14e7eb0950abd255d67e68cb86c12e2/pycryptodome-4.3.0-pp311-pypy311_pp80-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:b2ede0d69c7928ca2320258c70deaedf83f7350ca2a578fe01373e37d7273866", size = 1313604, upload-time = "2026-11-02T22:16:01.471Z" },
++    { url = "https://files.pythonhosted.org/packages/b6/5e/6c87676ffc96790c30ccb60917c5e9e06450df89168db8caf650cb698d9b/pycryptodome-4.3.0-pp311-pypy311_pp80-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:6670fc0ce7e6a6085d29317a0edea2e2fe14761493468d07b1e021ae3d8629a3", size = 1443883, upload-time = "2026-11-02T22:16:03.424Z" },
++    { url = "https://files.pythonhosted.org/packages/d8/ba/7c534c1d9295911542a80c863ec8cd47ec7803281a59563f73c89ec5a5de/pycryptodome-4.3.0-pp311-pypy311_pp80-win_amd64.whl", hash = "sha256:29f20544f485f73f3c0f9c734327a920413b9688b22d68e9968ac9681439932f", size = 1678725, upload-time = "2026-11-02T22:16:05.373Z" },
++    { url = "https://files.pythonhosted.org/packages/a3/b2/67206132363af8245cf233b3f959046a8b5cd58981bd55b36b685e30c1e4/pycryptodome-4.3.0-pp312-pypy312_pp80-macosx_10_15_x86_64.whl", hash = "sha256:4cf6cc92277a1c82ee6e4abcb8c1f94a4ce08b00dcbb50507eb332a09623a945", size = 1485362, upload-time = "2026-11-02T22:16:07.15Z" },
++    { url = "https://files.pythonhosted.org/packages/e3/b7/8d941f5e89b0e5aa53b673af64c0ddb750b4a502bbd65f61c4b144bd7d1c/pycryptodome-4.3.0-pp312-pypy312_pp80-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:effb321424ed70ee8ac9a65eb6dd6eeb33d3426d0ae7dd3499adb6a8e75224cf", size = 1313605, upload-time = "2026-11-02T22:16:10.068Z" },
++    { url = "https://files.pythonhosted.org/packages/8f/44/b895d9dfd61fc3387331435b0ac1b872052ab87423061611402134ecff9b/pycryptodome-4.3.0-pp312-pypy312_pp80-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:5a2131aabc5214f0c19459b581cad14503d567c55ddf3a24ff6150b4fb436b8d", size = 1443883, upload-time = "2026-11-02T22:16:12.126Z" },
++    { url = "https://files.pythonhosted.org/packages/51/bd/31a3f0683f70f663192981ee27f4ca19c5ed8b7a9db8366bb7fe4cb04297/pycryptodome-4.3.0-pp312-pypy312_pp80-win_amd64.whl", hash = "sha256:70b8127d1127006772208188995bddc4c1021244bb2deca06d2226f040bfbcb6", size = 1678723, upload-time = "2026-11-02T22:16:13.908Z" },
+ ]
+ 
+ [[package]]
