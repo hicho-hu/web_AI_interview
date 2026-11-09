@@ -7,6 +7,7 @@ import { queryClient } from './query';
 import { useSession } from '../stores/session';
 import Shell from '../components/layout/Shell';
 import { ErrorState, Loading } from '../components/common/ui';
+import { useMobileViewport } from './useMobileViewport';
 
 const Login = lazy(() => import('../pages/Login'));
 const Dashboard = lazy(() => import('../pages/Dashboard'));
@@ -66,6 +67,7 @@ const router = createBrowserRouter([
   { path: '*', element: <Navigate to="/dashboard" replace /> },
 ]);
 export default function Application() {
+  useMobileViewport();
   return (
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>

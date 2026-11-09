@@ -10,6 +10,7 @@
     "test": "vitest run",
     "format": "prettier --write src tests docs *.json *.ts index.html",
     "test:e2e": "playwright test",
+    "test:e2e:mobile": "H5_PREVIEW=1 playwright test",
     "test:e2e:live": "LIVE_API=1 playwright test tests/e2e/live.spec.ts",
     "test:e2e:billing:live": "LIVE_API=1 playwright test tests/e2e/billing-live.spec.ts",
     "test:e2e:production": "PRODUCTION_PREVIEW=1 playwright test tests/e2e/production.spec.ts"

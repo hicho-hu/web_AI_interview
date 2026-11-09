@@ -62,6 +62,7 @@ export const api = {
       resend_after: number;
       delivery: string;
       development_code?: string;
+      mock_code?: string;
     }>('POST', binding ? '/users/me/email-code' : '/auth/email-code', {
       email,
       ...(!binding ? { purpose } : {}),

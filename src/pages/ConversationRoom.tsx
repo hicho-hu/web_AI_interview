@@ -39,6 +39,7 @@ import SessionReplay from '../components/common/SessionReplay';
 import { ErrorState, Loading, ModeIcon } from '../components/common/ui';
 import { formatClock, modeLabels, processingTurn, remainingSeconds } from '../utils/interview';
 import type { Interview, Turn } from '../types/domain';
+import { randomUUID } from '../utils/uuid';
 
 type Phase =
   | 'idle'
@@ -359,7 +360,7 @@ export default function ConversationRoom({ initial }: { initial: Interview }) {
     )
       return;
     const answer = {
-      id: crypto.randomUUID(),
+      id: randomUUID(),
       turnId: question.id,
       blob: wavBlob(value.samples, value.sampleRate),
       duration: value.durationMs,
@@ -471,7 +472,7 @@ export default function ConversationRoom({ initial }: { initial: Interview }) {
         if (!question || closing.current) return;
         suppressedAudio.current.add(question.id);
         const cue: CaptionCue = {
-          id: `candidate:${question.id}:${crypto.randomUUID()}`,
+          id: `candidate:${question.id}:${randomUUID()}`,
           speaker: 'candidate',
           text: '',
           startMs: Math.max(0, current.elapsedMs - 300),

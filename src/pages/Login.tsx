@@ -266,6 +266,13 @@ export default function Login() {
                     本地邮件预览 · 验证码 <b>{emailCode.developmentCode}</b>，未发送真实邮件。
                   </p>
                 )}
+                {authMode === 'register' &&
+                  emailCode.mockCode &&
+                  emailCode.destination === email.trim().toLowerCase() && (
+                    <p className="email-preview-note" role="status">
+                      注册测试模式 · 验证码 <b>{emailCode.mockCode}</b>，未发送真实邮件，未验证邮箱归属。
+                    </p>
+                  )}
               </>
             )}
             <label className="field">
@@ -337,7 +344,9 @@ export default function Login() {
                 : authMode === 'login'
                   ? '使用邮箱登录'
                   : authMode === 'register'
-                    ? '验证邮箱并注册'
+                    ? emailCode.mockCode
+                      ? '使用测试验证码注册'
+                      : '验证邮箱并注册'
                     : '重置密码并登录'}
               <ArrowRight size={18} />
             </button>
@@ -353,7 +362,9 @@ export default function Login() {
                       ? '请确认两次输入的密码一致。'
                       : authMode === 'login'
                         ? '填写邮箱和密码后即可登录。'
-                        : '信息已就绪，提交后将验证邮箱并创建账号。'}
+                        : authMode === 'register' && emailCode.mockCode
+                          ? '信息已就绪，将使用测试验证码创建账号。'
+                          : '信息已就绪，提交后将验证邮箱并创建账号。'}
             </p>
             {authError !== null && <ErrorState error={authError} />}
             {authMode === 'login' && (

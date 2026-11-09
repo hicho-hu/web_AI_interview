@@ -2,7 +2,7 @@ import { lazy, Suspense, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { App, Pagination } from 'antd';
-import { CalendarDays, ChevronLeft, Filter, Plus, Search, Trash2, TrendingUp } from 'lucide-react';
+import { CalendarDays, ChevronLeft, Filter, Plus, Search, TrendingUp } from 'lucide-react';
 import { api } from '../services/api';
 import { queryClient } from '../app/query';
 import { Empty, ErrorState, InterviewRows, Loading, PageHeading } from '../components/common/ui';
@@ -193,22 +193,11 @@ export default function History() {
           />
         ) : (
           <div className="history-rows-with-delete">
-            <InterviewRows items={items} />
-            <div className="delete-column">
-              <span />
-              {items.map((i) => (
-                <button
-                  key={i.id}
-                  className="icon-btn delete-record"
-                  aria-label={`删除 ${i.job_title} 面试`}
-                  title="删除面试"
-                  disabled={deleting}
-                  onClick={() => remove(i.id, i.job_title)}
-                >
-                  <Trash2 size={15} />
-                </button>
-              ))}
-            </div>
+            <InterviewRows
+              items={items}
+              deleting={deleting}
+              onRemove={(item) => remove(item.id, item.job_title)}
+            />
           </div>
         )}
         <div className="history-pagination">

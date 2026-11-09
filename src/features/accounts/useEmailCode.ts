@@ -4,6 +4,7 @@ import { api } from '../../services/api';
 export function useEmailCode() {
   const [challengeId, setChallengeId] = useState('');
   const [developmentCode, setDevelopmentCode] = useState('');
+  const [mockCode, setMockCode] = useState('');
   const [remaining, setRemaining] = useState(0);
   const [sending, setSending] = useState(false);
   const [destination, setDestination] = useState('');
@@ -20,10 +21,11 @@ export function useEmailCode() {
       setChallengeId(result.challenge_id);
       setDestination(email.trim().toLowerCase());
       setDevelopmentCode(result.development_code ?? '');
+      setMockCode(result.delivery === 'registration_mock' ? (result.mock_code ?? '') : '');
       setRemaining(result.resend_after);
     } finally {
       setSending(false);
     }
   }
-  return { challengeId, developmentCode, destination, remaining, sending, send };
+  return { challengeId, developmentCode, mockCode, destination, remaining, sending, send };
 }

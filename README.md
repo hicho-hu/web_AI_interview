@@ -23,6 +23,8 @@ npm run dev
 
 ## 功能
 
+手机打开自动呈现 H5 版本，PC 和平板保留现有版本，手机横屏仍使用 H5。同一地址复用账号、数据与全部业务接口。手机端提供底部导航、卡片记录、全屏岗位选择、触屏表单和面试室布局，详见 [H5 适配说明与验证](docs/mobile.md)。
+
 页面涵盖邮箱登录/注册、工作台、创建面试、面试室、评估报告、历史记录、我的权益、邀请好友和个人中心。支持 JD、级别、可选 PDF/DOCX 简历、面试难度/时长/题数/语言/类型/追问；文字问答、录音录像和回放、签名直传、任务轮询；服务端状态恢复、幂等写请求、报告证据和能力雷达、历史筛选/分页/趋势、权益购买、授权撤回、数据导出与删除。
 
 语音和视频面试均为连续对话：面试官自动语音提问，候选人开口即可打断，停顿约 0.8 秒后自动接续。回答上传期间继续说话，会合并补充内容后再提交分析。整个过程无需逐题点击录制或提交。
@@ -90,7 +92,16 @@ docker run --rm -p 8080:80 interview-studio-web
 
 `/invitations` 展示专属邀请码、链接和奖励进度；后台“推广中心”配置每 N 人奖励及双方分类权益，另可创建分佣推广链接、配置比例并查看佣金台账。订单按快照计提，退款冲销；当前不执行真实转账。
 
-开发环境默认本地邮件预览，页面会显示验证码及“未发送真实邮件”。正式发邮件需后端设置 `MAIL_MODE=smtp` 和 `SMTP_*`，生产不会返回验证码。配置见后端 `docs/accounts-growth.md`，迁移版本 `c83f5a7e0203`。
+开发环境默认本地邮件预览，页面会显示验证码及“未发送真实邮件”。正式发邮件需后端设置 `MAIL_MODE=smtp` 和 `SMTP_*`，正常邮件发送模式不会返回验证码。配置见后端 `docs/accounts-growth.md`，迁移版本 `c83f5a7e0203`。
+
+生产环境临时测试注册时，更新本次前后端代码，在后端设置 `MAIL_MODE=disabled`、`REGISTRATION_EMAIL_MOCK_ENABLED=true`，重启 API 服务（Docker 需重新创建容器以加载环境变量），并重新构建部署前端。点击“发送验证码”后，注册页显示“注册测试模式”与本次随机验证码，直接输入即可注册并使用邮箱密码登录；账号和权益仍写入真实数据库。此开关默认关闭，只模拟注册邮件，未验证邮箱归属；找回密码和换绑邮箱仍遵循 `MAIL_MODE`。接入真实邮件时设置 `REGISTRATION_EMAIL_MOCK_ENABLED=false`、`MAIL_MODE=smtp` 并补齐 SMTP 配置即可。后端兼容补丁见 `docs/backend-registration-email-mock.patch`。
+
+前端 UUID 生成兼容公网 HTTP 下没有 `crypto.randomUUID` 的浏览器环境；语音/视频面试仍需 HTTPS。注册模拟验收使用启用上述配置的隔离后端与生产构建：
+
+```sh
+npm run build
+REGISTRATION_MOCK_E2E=1 PRODUCTION_PREVIEW=1 API_PROXY_TARGET=http://127.0.0.1:8015 npm run test:e2e -- tests/e2e/registration-mock.spec.ts
+```
 
 ## 阿里云 OSS 上传
 

@@ -1,0 +1,1148 @@
+/* Shared row actions stay attached to their record, including wrapped titles. */
+.interview-record {
+  position: relative;
+}
+.interview-record > .delete-record {
+  position: absolute;
+  right: -27px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+.mobile-plan-summary {
+  display: none;
+}
+
+/* Only phones opt into H5. Existing desktop/tablet breakpoints stay in global.css. */
+@media screen {
+  html[data-device='phone'] {
+    -webkit-text-size-adjust: 100%;
+    scroll-padding-top: 80px;
+  }
+  html[data-device='phone'] body {
+    min-width: 320px;
+  }
+  html[data-device='phone'] :is(button, a, input, select, textarea) {
+    touch-action: manipulation;
+  }
+  html[data-device='phone'] :is(input:not([type='checkbox']), select, textarea) {
+    font-size: 16px;
+    max-width: 100%;
+  }
+  html[data-device='phone'] :is(input, textarea, select) {
+    scroll-margin-block: 90px;
+  }
+  html[data-device='phone'] :is(.btn, .btn.small, .icon-btn) {
+    min-height: 44px;
+  }
+  html[data-device='phone'] .btn {
+    font-size: 14px;
+    white-space: normal;
+  }
+  html[data-device='phone'] .icon-btn {
+    min-width: 44px;
+  }
+  html[data-device='phone'] :is(.text-link, .agreement button) {
+    min-height: 36px;
+  }
+  html[data-device='phone'] :is(.info-banner, .error-state) {
+    font-size: 13px;
+    overflow-wrap: anywhere;
+  }
+  html[data-device='phone'] .error-state {
+    flex-wrap: wrap;
+  }
+  html[data-device='phone'] .error-state > div {
+    flex: 1;
+    min-width: 0;
+  }
+  html[data-device='phone'] :is(.inline, .panel-heading, .field-footer) {
+    flex-wrap: wrap;
+  }
+  html[data-device='phone'] :is(.main-shell, .main-content, .panel, .job-cell > div, .page-heading > div) {
+    min-width: 0;
+  }
+  html[data-device='phone'] :is(.panel, .page-heading, .room-top, .info-banner) {
+    overflow-wrap: anywhere;
+  }
+
+  html[data-device='phone'] .main-shell {
+    margin-left: 0;
+    padding-bottom: calc(76px + env(safe-area-inset-bottom));
+    min-height: 100dvh;
+  }
+  html[data-device='phone'] .main-content {
+    width: 100%;
+    max-width: 700px;
+    margin-inline: auto;
+    padding: 20px max(16px, env(safe-area-inset-right)) 24px max(16px, env(safe-area-inset-left));
+  }
+  html[data-device='phone'] .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    height: auto;
+    min-height: 60px;
+    padding: calc(8px + env(safe-area-inset-top)) 12px 8px;
+    background: #ffffffed;
+    backdrop-filter: blur(16px);
+  }
+  html[data-device='phone'] .breadcrumb {
+    gap: 5px;
+    font-size: 15px;
+    min-width: 0;
+  }
+  html[data-device='phone'] .breadcrumb > :is(span, svg) {
+    display: none;
+  }
+  html[data-device='phone'] .breadcrumb strong {
+    white-space: nowrap;
+  }
+  html[data-device='phone'] .topbar-right {
+    gap: 5px;
+  }
+  html[data-device='phone'] .topbar-profile {
+    padding: 0;
+    min-width: 44px;
+    min-height: 44px;
+    justify-content: center;
+  }
+  html[data-device='phone'] .topbar-profile > :is(span:nth-child(2), svg),
+  html[data-device='phone'] .topbar-separator {
+    display: none;
+  }
+  html[data-device='phone'] .environment-badge {
+    font-size: 10px;
+    max-width: 108px;
+    white-space: normal;
+    line-height: 1.5;
+  }
+  html[data-device='phone'] .demo-ribbon {
+    padding: 8px 16px;
+    font-size: 11px;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+  html[data-device='phone'] .demo-ribbon > span {
+    flex: 1;
+    min-width: 180px;
+  }
+  html[data-device='phone'] .demo-ribbon > button {
+    min-height: 32px;
+    margin-left: 18px;
+  }
+  html[data-device='phone'] .footer {
+    padding: 12px 16px;
+    text-align: center;
+    flex-direction: column;
+    gap: 5px;
+    font-size: 10px;
+  }
+  html[data-device='phone'] .mobile-tabbar {
+    position: fixed;
+    z-index: 32;
+    inset: auto 0 0;
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    padding: 6px max(4px, env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom))
+      max(4px, env(safe-area-inset-left));
+    background: #fffffff5;
+    backdrop-filter: blur(18px);
+    border-top: 1px solid #e8edf6;
+    box-shadow: 0 -4px 22px #27324d05;
+  }
+  html[data-device='phone'] .mobile-tab {
+    display: flex;
+    min-height: 54px;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 2px;
+    color: #7b859b;
+    font-size: 11px;
+  }
+  html[data-device='phone'] .mobile-tab > span {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 30px;
+    border-radius: 12px;
+  }
+  html[data-device='phone'] .mobile-tab.active {
+    color: var(--blue);
+    font-weight: 600;
+  }
+  html[data-device='phone'] .mobile-tab.active > span {
+    background: #eef2ff;
+  }
+  html[data-device='phone'] .mobile-tab-create > span {
+    background: var(--blue);
+    color: white;
+    height: 34px;
+    box-shadow: 0 3px 9px #3d65ec33;
+  }
+  html[data-device='phone'] .mobile-tab-create.active > span {
+    background: var(--blue-hover);
+  }
+  html[data-device='phone'][data-keyboard-open='true'] .mobile-tabbar {
+    display: none;
+  }
+  html[data-device='phone'] .sidebar {
+    transform: translateX(-100%);
+    width: min(300px, 88vw);
+    padding: calc(20px + env(safe-area-inset-top)) 20px calc(12px + env(safe-area-inset-bottom));
+    height: 100dvh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  html[data-device='phone'] .sidebar.is-open {
+    transform: translateX(0);
+  }
+  html[data-device='phone'] .sidebar-brand {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  html[data-device='phone'] :is(.mobile-close, .menu-toggle) {
+    display: inline-flex;
+  }
+  html[data-device='phone'] .sidebar-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 35;
+    background: #27324d66;
+    backdrop-filter: blur(2px);
+  }
+  html[data-device='phone'] .sidebar .nav-item {
+    font-size: 14px;
+    min-height: 48px;
+  }
+  html[data-device='phone'] .sidebar .brand {
+    font-size: 19px;
+  }
+  html[data-device='phone'] .sidebar-bottom {
+    padding-top: 20px;
+  }
+  html[data-device='phone'] .quota-card {
+    flex-shrink: 0;
+  }
+
+  html[data-device='phone'] .page-heading {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  html[data-device='phone'] .page-heading h1 {
+    font-size: 22px;
+    line-height: 1.5;
+    letter-spacing: -0.5px;
+  }
+  html[data-device='phone'] .eyebrow {
+    display: none;
+  }
+  html[data-device='phone'] .page-description {
+    font-size: 13px;
+    line-height: 1.8;
+    max-width: none;
+    margin-top: 7px;
+  }
+  html[data-device='phone'] .page-heading > .btn {
+    margin-top: 0;
+    align-self: flex-start;
+    font-size: 14px;
+  }
+  html[data-device='phone'] .today {
+    display: none;
+  }
+  html[data-device='phone'] .panel {
+    border-radius: 16px;
+  }
+  html[data-device='phone'] .panel-heading {
+    padding: 18px 16px;
+    gap: 10px;
+  }
+  html[data-device='phone'] .panel-heading h2 {
+    font-size: 16px;
+  }
+  html[data-device='phone'] .panel-heading p {
+    font-size: 12px;
+    line-height: 1.7;
+  }
+  html[data-device='phone'] .text-link {
+    font-size: 13px;
+  }
+  html[data-device='phone'] .hero-card {
+    min-height: 0;
+    border-radius: 20px;
+  }
+  html[data-device='phone'] .hero-copy {
+    width: 100%;
+    padding: 24px;
+  }
+  html[data-device='phone'] .hero-copy h2 {
+    font-size: 29px;
+    max-width: none;
+    line-height: 1.45;
+    margin-block: 14px;
+  }
+  html[data-device='phone'] .hero-copy > p {
+    font-size: 13px;
+    max-width: none;
+    line-height: 1.8;
+  }
+  html[data-device='phone'] .hero-tag {
+    font-size: 11px;
+  }
+  html[data-device='phone'] .hero-button {
+    width: 100%;
+    margin-top: 20px;
+    min-height: 48px;
+  }
+  html[data-device='phone'] .hero-benefits {
+    font-size: 11px;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  html[data-device='phone'] :is(.hero-art, .desktop-break) {
+    display: none;
+  }
+  html[data-device='phone'] .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-block: 16px 20px;
+  }
+  html[data-device='phone'] .stat-card {
+    padding: 15px 13px;
+    border-radius: 14px;
+  }
+  html[data-device='phone'] .stat-top {
+    font-size: 12px;
+    gap: 4px;
+  }
+  html[data-device='phone'] .stat-value {
+    font-size: 29px;
+  }
+  html[data-device='phone'] .stat-card > p {
+    font-size: 11px;
+  }
+  html[data-device='phone'] :is(.dashboard-columns, .dashboard-lower) {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 18px;
+  }
+  html[data-device='phone'] .tips-panel {
+    display: block;
+  }
+  html[data-device='phone'] .tip-body {
+    display: block;
+    padding: 16px 20px;
+  }
+  html[data-device='phone'] .tip-body h3 {
+    font-size: 20px;
+    margin-block: 10px;
+  }
+  html[data-device='phone'] .tip-body > p {
+    font-size: 13px;
+  }
+  html[data-device='phone'] .star-steps {
+    max-width: none;
+    margin-top: 16px;
+  }
+  html[data-device='phone'] .star-steps small {
+    font-size: 12px;
+  }
+  html[data-device='phone'] .guide-step {
+    margin: 18px 16px;
+  }
+  html[data-device='phone'] .guide-step strong {
+    font-size: 14px;
+  }
+  html[data-device='phone'] .guide-step p {
+    font-size: 12px;
+  }
+  html[data-device='phone'] .supported-modes {
+    flex-wrap: wrap;
+    margin: 16px;
+  }
+
+  /* The same records become cards, with dates, status and separate delete actions. */
+  html[data-device='phone'] .table-head {
+    display: none;
+  }
+  html[data-device='phone'] .interview-record {
+    margin: 0 12px 12px;
+    border: 1px solid #eaf0f8;
+    border-radius: 12px;
+    background: #fbfcff;
+  }
+  html[data-device='phone'] :is(.recent-panel, .history-panel) .interview-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px 8px;
+    min-height: 122px;
+    padding: 14px;
+    border: 0;
+  }
+  html[data-device='phone'] .interview-row .job-cell {
+    grid-column: 1 / -1;
+    gap: 10px;
+  }
+  html[data-device='phone'] .interview-row .job-cell strong {
+    font-size: 15px;
+    white-space: normal;
+    line-height: 1.6;
+  }
+  html[data-device='phone'] .interview-row .job-cell small {
+    font-size: 12px;
+  }
+  html[data-device='phone'] .interview-row .job-avatar {
+    width: 40px;
+    height: 42px;
+    flex-shrink: 0;
+  }
+  html[data-device='phone'] .interview-row .table-mode {
+    display: block;
+    font-size: 12px;
+  }
+  html[data-device='phone'] .interview-row .table-date {
+    display: block;
+    grid-column: 1;
+    font-size: 12px;
+  }
+  html[data-device='phone'] .interview-row > span:nth-last-child(2) {
+    grid-column: 2;
+    grid-row: 2 / 4;
+    align-self: center;
+  }
+  html[data-device='phone'] .interview-row .row-arrow {
+    display: none;
+  }
+  html[data-device='phone'] .interview-row .status {
+    font-size: 12px;
+  }
+  html[data-device='phone'] .has-delete .interview-row .job-cell {
+    padding-right: 34px;
+  }
+  html[data-device='phone'] .interview-record > .delete-record {
+    top: 10px;
+    right: 4px;
+    transform: none;
+  }
+  html[data-device='phone'] .history-rows-with-delete {
+    padding-right: 0;
+  }
+  html[data-device='phone'] .history-filters {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    padding: 0 14px 18px;
+  }
+  html[data-device='phone'] .history-filters .search-field {
+    grid-column: 1 / -1;
+    min-width: 0;
+    min-height: 46px;
+  }
+  html[data-device='phone'] .history-filters > select {
+    min-width: 0;
+    width: 100%;
+    min-height: 46px;
+    font-size: 14px;
+  }
+  html[data-device='phone'] .date-filter {
+    grid-column: 1 / -1;
+    display: flex;
+    width: 100%;
+    min-width: 0;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 6px;
+  }
+  html[data-device='phone'] .date-filter input {
+    flex: 1;
+    min-width: 0;
+    width: 100px;
+    font-size: 13px;
+    min-height: 44px;
+  }
+  html[data-device='phone'] .history-pagination {
+    padding: 16px;
+    flex-wrap: wrap;
+    font-size: 12px;
+  }
+  html[data-device='phone'] .history-pagination .back-link {
+    display: none;
+  }
+  html[data-device='phone'] .ant-pagination .ant-pagination-item,
+  html[data-device='phone'] .ant-pagination .ant-pagination-prev,
+  html[data-device='phone'] .ant-pagination .ant-pagination-next {
+    min-width: 36px;
+    height: 36px;
+    line-height: 34px;
+  }
+
+  html[data-device='phone'] .create-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  html[data-device='phone'] .create-summary {
+    display: none;
+  }
+  html[data-device='phone'] .form-panel {
+    padding: 20px 16px;
+  }
+  html[data-device='phone'] .form-section-heading h2 {
+    font-size: 17px;
+  }
+  html[data-device='phone'] .form-section-heading p {
+    font-size: 12px;
+  }
+  html[data-device='phone'] :is(.field, .field-label) {
+    font-size: 14px;
+  }
+  html[data-device='phone'] .field :is(input, select, textarea) {
+    font-size: 16px;
+    padding: 12px;
+    min-height: 46px;
+    min-width: 0;
+  }
+  html[data-device='phone'] .form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  html[data-device='phone'] .create-form > .form-panel:nth-of-type(2) .form-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  html[data-device='phone'] .field-footer {
+    font-size: 11px;
+  }
+  html[data-device='phone'] .optional {
+    font-size: 11px;
+    margin-left: 5px;
+  }
+  html[data-device='phone'] .mode-options {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 7px;
+  }
+  html[data-device='phone'] .mode-option {
+    padding: 15px 5px;
+    min-width: 0;
+  }
+  html[data-device='phone'] .mode-option strong {
+    font-size: 13px;
+  }
+  html[data-device='phone'] .mode-option small {
+    font-size: 11px;
+    line-height: 1.6;
+  }
+  html[data-device='phone'] .switch-field strong {
+    font-size: 14px;
+  }
+  html[data-device='phone'] .switch-field p {
+    font-size: 12px;
+  }
+  html[data-device='phone'] .mobile-plan-summary {
+    display: grid;
+    gap: 7px;
+    padding: 16px;
+    margin-bottom: 18px;
+    border-radius: 14px;
+    border: 1px solid #dfe7ff;
+    background: #edf2ff;
+    font-size: 13px;
+  }
+  html[data-device='phone'] .mobile-plan-summary > span {
+    color: #687692;
+  }
+  html[data-device='phone'] .agreement {
+    font-size: 13px;
+    line-height: 1.9;
+    align-items: flex-start;
+  }
+  html[data-device='phone'] .agreement input {
+    margin-top: 5px;
+    min-width: 20px;
+    height: 20px;
+  }
+  html[data-device='phone'] .form-actions {
+    position: sticky;
+    bottom: calc(76px + env(safe-area-inset-bottom));
+    z-index: 10;
+    display: grid;
+    grid-template-columns: 1fr 2fr;
+    gap: 10px;
+    padding: 12px 0;
+    background: #f5f7fbf5;
+    backdrop-filter: blur(12px);
+  }
+  html[data-device='phone'] .form-actions .btn {
+    font-size: 14px;
+    min-height: 48px;
+    padding: 10px;
+  }
+  html[data-device='phone'] .create-submit-note {
+    font-size: 12px;
+  }
+  html[data-device='phone'][data-keyboard-open='true'] .form-actions {
+    position: static;
+  }
+
+  /* Phone occupation picker: full-height sheet with two horizontal category rails. */
+  html[data-device='phone'] .job-picker-backdrop {
+    padding: 0;
+    align-items: end;
+  }
+  html[data-device='phone'] .job-picker-modal {
+    width: 100%;
+    height: var(--app-viewport-height, 100dvh);
+    max-height: 100dvh;
+    border: 0;
+    border-radius: 0;
+    padding-top: env(safe-area-inset-top);
+  }
+  html[data-device='phone'] .job-picker-modal > header {
+    padding: 12px 16px;
+  }
+  html[data-device='phone'] .job-picker-search {
+    margin: 12px 16px;
+  }
+  html[data-device='phone'] .job-picker-search input {
+    font-size: 16px;
+    min-height: 40px;
+  }
+  html[data-device='phone'] .job-picker-tree {
+    display: flex;
+    flex-direction: column;
+  }
+  html[data-device='phone'] .job-picker-tree > nav {
+    flex: 0 0 auto;
+    display: flex;
+    overflow-x: auto;
+    max-height: 92px;
+    padding: 6px 10px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  html[data-device='phone'] .job-picker-tree > nav:empty {
+    display: none;
+  }
+  html[data-device='phone'] .job-picker-tree > nav button {
+    flex: 0 0 auto;
+    width: auto;
+    max-width: 170px;
+    font-size: 12px;
+    padding: 10px;
+    min-height: 44px;
+  }
+  html[data-device='phone'] .job-picker-tree .job-picker-results {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  html[data-device='phone'] .job-picker-option {
+    padding: 14px 12px;
+    gap: 10px;
+  }
+  html[data-device='phone'] .job-picker-option strong {
+    font-size: 15px;
+  }
+  html[data-device='phone'] .job-picker-option small {
+    font-size: 12px;
+  }
+  html[data-device='phone'] .job-picker-seniority {
+    display: none;
+  }
+  html[data-device='phone'] .job-picker-modal > footer {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    padding: 10px 16px calc(12px + env(safe-area-inset-bottom));
+    gap: 8px;
+  }
+  html[data-device='phone'] .job-picker-modal > footer > span {
+    grid-column: 1 / -1;
+    font-size: 10px;
+  }
+
+  html[data-device='phone'] .in-room .main-shell {
+    padding-bottom: 0;
+  }
+  html[data-device='phone'] .in-room .footer {
+    display: none;
+  }
+  html[data-device='phone'] .room-top {
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 18px;
+  }
+  html[data-device='phone'] .room-top > div:first-child {
+    flex: 1;
+    min-width: 0;
+  }
+  html[data-device='phone'] .room-top h1 {
+    font-size: 19px;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  html[data-device='phone'] .room-mode {
+    font-size: 11px;
+  }
+  html[data-device='phone'] .room-timer {
+    min-width: 85px;
+    max-width: 100px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  html[data-device='phone'] .room-timer strong {
+    font-size: 23px;
+  }
+  html[data-device='phone'] .room-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  html[data-device='phone'] .interviewer-panel {
+    display: none;
+  }
+  html[data-device='phone'] .answer-column {
+    width: 100%;
+  }
+  html[data-device='phone'] :is(.question-panel, .answer-panel) {
+    padding: 18px 16px;
+  }
+  html[data-device='phone'] .question-text {
+    font-size: 18px;
+    line-height: 1.85;
+    margin-block: 18px;
+  }
+  html[data-device='phone'] .question-meta {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  html[data-device='phone'] .question-meta small {
+    font-size: 12px;
+  }
+  html[data-device='phone'] .question-meta audio {
+    max-width: 100%;
+  }
+  html[data-device='phone'] .answer-panel > textarea {
+    font-size: 16px;
+    min-height: 190px;
+    line-height: 1.9;
+    padding: 13px;
+  }
+  html[data-device='phone'] .answer-heading h3 {
+    font-size: 15px;
+  }
+  html[data-device='phone'] .answer-footer {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  html[data-device='phone'] .answer-footer > span {
+    font-size: 11px;
+  }
+  html[data-device='phone'] .answer-footer small {
+    display: none;
+  }
+  html[data-device='phone'] .answer-footer .btn {
+    min-height: 46px;
+    font-size: 14px;
+  }
+  html[data-device='phone'] .room-right {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    gap: 16px;
+  }
+  html[data-device='phone'] .room-controls {
+    display: flex;
+    flex-direction: row;
+    gap: 10px;
+  }
+  html[data-device='phone'] .room-controls .btn {
+    flex: 1;
+    padding-inline: 10px;
+  }
+  html[data-device='phone'] .progress-panel {
+    padding: 16px;
+  }
+  html[data-device='phone'] .progress-panel h3 {
+    font-size: 14px;
+  }
+  html[data-device='phone'] .progress-panel ol {
+    max-height: 155px;
+    overflow-y: auto;
+  }
+  html[data-device='phone'] .room-tip {
+    display: none;
+  }
+  html[data-device='phone'] .ready-panel {
+    padding: 24px 16px;
+  }
+  html[data-device='phone'] .ready-panel h2 {
+    font-size: 18px;
+  }
+  html[data-device='phone'] .ready-panel p {
+    font-size: 13px;
+  }
+  html[data-device='phone'] .room-footer-note {
+    font-size: 11px;
+    align-items: flex-start;
+  }
+  html[data-device='phone'] .conversation-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 18px;
+  }
+  html[data-device='phone'] .conversation-stage {
+    padding: 18px 16px;
+  }
+  html[data-device='phone'] .conversation-stage-heading {
+    font-size: 13px;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  html[data-device='phone'] .continuous-recording {
+    font-size: 11px;
+  }
+  html[data-device='phone'] .conversation-visual {
+    min-height: 235px;
+    padding: 20px 0;
+  }
+  html[data-device='phone'] .conversation-orb {
+    width: 90px;
+    height: 90px;
+    margin-bottom: 20px;
+  }
+  html[data-device='phone'] .conversation-orb svg {
+    width: 55px;
+  }
+  html[data-device='phone'] .conversation-visual h2 {
+    font-size: 16px;
+  }
+  html[data-device='phone'] .conversation-visual > p {
+    font-size: 12px;
+    max-width: 100%;
+    line-height: 1.8;
+  }
+  html[data-device='phone'] .conversation-visual.with-scene {
+    min-height: 0;
+    padding: 12px 0;
+  }
+  html[data-device='phone'] .interview-scene {
+    margin-bottom: 10px;
+    border-radius: 10px;
+  }
+  html[data-device='phone'] .conversation-question {
+    padding: 16px;
+  }
+  html[data-device='phone'] .conversation-question > p {
+    font-size: 16px;
+    line-height: 1.8;
+  }
+  html[data-device='phone'] .continuous-setup .agreement {
+    font-size: 13px;
+  }
+  html[data-device='phone'] .continuous-setup .btn {
+    width: 100%;
+    font-size: 14px;
+  }
+  html[data-device='phone'] .conversation-controls {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  html[data-device='phone'] .conversation-controls .btn {
+    padding: 12px 8px;
+    font-size: 13px;
+  }
+  html[data-device='phone'] .conversation-guide {
+    padding: 20px 16px;
+  }
+  html[data-device='phone'] .conversation-transcript {
+    max-height: 330px;
+  }
+  html[data-device='phone'] .live-captions {
+    padding: 12px 14px;
+    min-height: 80px;
+  }
+  html[data-device='phone'] .live-captions p {
+    font-size: 15px;
+    max-height: 100px;
+  }
+  html[data-device='phone'] .full-audio-player {
+    flex-wrap: wrap;
+    padding-inline: 16px;
+  }
+  html[data-device='phone'] .full-audio-player > audio {
+    flex-basis: 100%;
+    min-width: 0;
+    width: 100%;
+  }
+  html[data-device='phone'] .session-replay > video {
+    width: calc(100% - 32px);
+    margin-inline: 16px;
+  }
+  html[data-device='phone'] .session-replay-actions {
+    padding-inline: 16px;
+    flex-wrap: wrap;
+  }
+
+  html[data-device='phone']
+    :is(.report-summary-grid, .report-advice-grid, .dimension-grid, .review-feedback-grid) {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+  html[data-device='phone'] .report-score-panel {
+    padding: 24px 18px;
+  }
+  html[data-device='phone'] .report-score-panel > p {
+    font-size: 14px;
+  }
+  html[data-device='phone'] .dimension-grid {
+    padding-inline: 16px;
+    gap: 0;
+  }
+  html[data-device='phone'] .dimension-item strong {
+    font-size: 15px;
+  }
+  html[data-device='phone'] .dimension-item b {
+    font-size: 14px;
+  }
+  html[data-device='phone'] .dimension-item > p {
+    font-size: 13px;
+  }
+  html[data-device='phone'] .dimension-item blockquote {
+    font-size: 12px;
+  }
+  html[data-device='phone'] .review-toggle {
+    padding: 18px 16px;
+    gap: 10px;
+  }
+  html[data-device='phone'] .review-toggle strong {
+    font-size: 14px;
+    line-height: 1.8;
+  }
+  html[data-device='phone'] .review-toggle > svg {
+    flex-shrink: 0;
+  }
+  html[data-device='phone'] .review-content {
+    padding: 0 16px 20px;
+    font-size: 14px;
+  }
+  html[data-device='phone'] .report-bottom {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+  html[data-device='phone'] .advice-panel {
+    padding: 22px 18px;
+  }
+
+  html[data-device='phone'] .profile-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  html[data-device='phone'] .profile-aside {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  html[data-device='phone'] :is(.profile-environment p, .profile-quota p) {
+    font-size: 12px;
+  }
+  html[data-device='phone'] .profile-disclosure-summary {
+    padding: 16px;
+    gap: 10px;
+  }
+  html[data-device='phone'] .profile-disclosure-title {
+    min-width: 0;
+  }
+  html[data-device='phone'] .profile-disclosure-title small {
+    font-size: 12px;
+  }
+  html[data-device='phone'] .profile-disclosure-action {
+    display: none;
+  }
+  html[data-device='phone'] .account-settings {
+    padding: 20px 16px;
+  }
+  html[data-device='phone'] .email-code-row {
+    gap: 8px;
+  }
+  html[data-device='phone'] .email-code-row .btn {
+    font-size: 12px;
+    padding-inline: 10px;
+  }
+  html[data-device='phone'] :is(.data-action, .consent-row) {
+    padding: 16px;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  html[data-device='phone'] :is(.data-action p, .consent-row p) {
+    font-size: 12px;
+    max-width: none;
+  }
+  html[data-device='phone'] .consent-row strong {
+    font-size: 14px;
+  }
+  html[data-device='phone'] .data-action .btn {
+    font-size: 13px;
+  }
+  html[data-device='phone'] .resume-item {
+    flex-wrap: wrap;
+    overflow-wrap: anywhere;
+  }
+  html[data-device='phone'] .billing-products {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+  html[data-device='phone'] .billing-balance {
+    padding: 20px 16px;
+    flex-wrap: wrap;
+    gap: 18px;
+  }
+  html[data-device='phone'] .billing-reserved {
+    width: 100%;
+    max-width: none;
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    padding: 12px 0 0;
+  }
+  html[data-device='phone'] .billing-product {
+    padding: 22px 18px;
+  }
+  html[data-device='phone'] .billing-order {
+    padding: 16px;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  html[data-device='phone'] .billing-order > .btn {
+    width: 100%;
+  }
+  html[data-device='phone'] .billing-mode-balances {
+    gap: 8px;
+  }
+  html[data-device='phone'] .billing-mode-balance {
+    padding: 14px 10px;
+  }
+  html[data-device='phone'] .billing-mode-balance > strong {
+    font-size: 27px;
+  }
+  html[data-device='phone'] .billing-mode-balance small {
+    display: block;
+  }
+  html[data-device='phone'] .billing-checkout dd.billing-credit-breakdown {
+    max-width: 60%;
+  }
+  html[data-device='phone'] .billing-modal-actions {
+    flex-direction: column;
+  }
+  html[data-device='phone'] :is(.invitation-hero, .invitation-rules, .invitation-history) {
+    padding: 22px 16px;
+  }
+  html[data-device='phone'] .invitation-link {
+    flex-direction: column;
+  }
+  html[data-device='phone'] .invitation-stats {
+    gap: 8px;
+  }
+  html[data-device='phone'] .invitation-stats section {
+    padding: 14px 10px;
+  }
+  html[data-device='phone'] .invitation-stats span {
+    font-size: 12px;
+  }
+  html[data-device='phone'] .invitation-stats strong {
+    font-size: 26px;
+  }
+  html[data-device='phone'] .invitation-stats small {
+    display: block;
+    font-size: 11px;
+  }
+  html[data-device='phone'] .invitation-history > .invitation-reward-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  html[data-device='phone'] .invitation-history .invitation-friend-row {
+    grid-template-columns: 38px minmax(0, 1fr);
+    gap: 8px 12px;
+  }
+  html[data-device='phone'] .invitation-friend-row > :is(time, .status) {
+    grid-column: 2;
+  }
+  html[data-device='phone'] .invitation-history time {
+    font-size: 12px;
+  }
+
+  html[data-device='phone'] .login-page {
+    min-height: 100dvh;
+    flex-direction: column;
+  }
+  html[data-device='phone'] .login-story {
+    width: 100%;
+    max-width: none;
+    min-height: 0;
+    padding: calc(24px + env(safe-area-inset-top)) 24px 28px;
+  }
+  html[data-device='phone'] .login-story-content {
+    padding: 20px 0 0;
+  }
+  html[data-device='phone'] .login-story h1 {
+    font-size: 32px;
+    line-height: 1.45;
+  }
+  html[data-device='phone'] .login-story-content > p {
+    font-size: 13px;
+    line-height: 1.8;
+  }
+  html[data-device='phone'] :is(.login-visual, .login-copyright, .login-features) {
+    display: none;
+  }
+  html[data-device='phone'] .login-form-side {
+    padding: 24px max(20px, env(safe-area-inset-right)) calc(28px + env(safe-area-inset-bottom))
+      max(20px, env(safe-area-inset-left));
+    overflow-y: visible;
+  }
+  html[data-device='phone'] .login-form {
+    width: 100%;
+    max-width: 480px;
+    padding: 0;
+  }
+  html[data-device='phone'] .login-form > h2 {
+    font-size: 24px;
+  }
+  html[data-device='phone'] .login-form .field {
+    font-size: 14px;
+  }
+  html[data-device='phone'] .login-form .field input {
+    font-size: 16px;
+  }
+  html[data-device='phone'] .login-form > .muted {
+    font-size: 13px;
+  }
+  html[data-device='phone'] .login-privacy {
+    font-size: 12px;
+  }
+  html[data-device='phone'] .ant-modal {
+    max-width: calc(100vw - 24px);
+    margin: 12px auto;
+    top: 24px;
+    padding-bottom: calc(24px + env(safe-area-inset-bottom));
+  }
+  html[data-device='phone'] .ant-modal .ant-modal-content {
+    padding: 20px 16px;
+    border-radius: 18px;
+  }
+  html[data-device='phone'] .ant-modal .ant-modal-body {
+    max-height: calc(var(--app-viewport-height, 100dvh) - 180px);
+    overflow-y: auto;
+    overflow-wrap: anywhere;
+  }
+}
+
+@media screen and (max-width: 359px) {
+  html[data-device='phone'] .create-form > .form-panel:nth-of-type(2) .form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media print {
+  .mobile-tabbar,
+  .mobile-plan-summary {
+    display: none !important;
+  }
+}

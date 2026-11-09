@@ -1,3 +1,5 @@
+import { randomUUID } from '../../utils/uuid';
+
 export interface PurchaseAttempt {
   key: string;
   productCode: string;
@@ -29,7 +31,7 @@ function savedAttempt(userId: string, productCode: string) {
   return current;
 }
 export function purchaseAttempt(userId: string, productCode: string): PurchaseAttempt {
-  const current = savedAttempt(userId, productCode) || { key: crypto.randomUUID(), productCode };
+  const current = savedAttempt(userId, productCode) || { key: randomUUID(), productCode };
   rememberPurchase(userId, current);
   return current;
 }

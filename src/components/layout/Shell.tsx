@@ -1,5 +1,5 @@
 import { creditsText } from '../../features/billing/credits';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { App, Modal } from 'antd';
@@ -26,6 +26,8 @@ import {
 import { useSession } from '../../stores/session';
 import { api, devLoginEnabled } from '../../services/api';
 import { queryClient } from '../../app/query';
+import { browserLayout } from '../../utils/device';
+import { useDialogFocus } from '../common/useDialogFocus';
 
 export function Brand() {
   return (
@@ -55,8 +57,12 @@ const routes = [
 export default function Shell() {
   const [open, setOpen] = useState(false);
   const [help, setHelp] = useState(false);
+  const navigationRef = useRef<HTMLElement>(null);
   const { user, mode, setUser, clear } = useSession();
   const location = useLocation();
+  const isPhone = browserLayout() === 'phone';
+  const inRoom = location.pathname.endsWith('/room');
+  useDialogFocus(isPhone && open, navigationRef, () => setOpen(false));
   const navigate = useNavigate();
   const { message } = App.useApp();
   const me = useQuery({ queryKey: ['me'], queryFn: api.me });
@@ -86,9 +92,17 @@ export default function Shell() {
     routes.find((r) => location.pathname.startsWith(r.to))?.label ||
     (location.pathname.includes('report') ? '面试评估报告' : 'AI 面试室');
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${isPhone ? 'phone-shell' : ''} ${inRoom ? 'in-room' : ''}`}>
       {open && <button className="sidebar-overlay" aria-label="关闭导航" onClick={() => setOpen(false)} />}
-      <aside className={`sidebar ${open ? 'is-open' : ''}`}>
+      <aside
+        ref={navigationRef}
+        id="app-navigation"
+        role={isPhone && open ? 'dialog' : undefined}
+        aria-modal={isPhone && open ? true : undefined}
+        aria-label={isPhone ? '导航菜单' : undefined}
+        className={`sidebar ${open ? 'is-open' : ''}`}
+        inert={isPhone && !open ? true : undefined}
+      >
         <div className="sidebar-brand">
           <Brand />
           <button className="icon-btn mobile-close" aria-label="关闭导航" onClick={() => setOpen(false)}>
@@ -156,10 +170,16 @@ export default function Shell() {
           </div>
         </div>
       </aside>
-      <div className="main-shell">
+      <div className="main-shell" inert={isPhone && open ? true : undefined}>
         <header className="topbar">
           <div className="breadcrumb">
-            <button className="icon-btn menu-toggle" aria-label="打开导航" onClick={() => setOpen(true)}>
+            <button
+              className="icon-btn menu-toggle"
+              aria-label="打开导航"
+              aria-controls="app-navigation"
+              aria-expanded={open}
+              onClick={() => setOpen(true)}
+            >
               <Menu size={21} />
             </button>
             <span>我的空间</span>
@@ -198,10 +218,7 @@ export default function Shell() {
             </button>
           </div>
         )}
-        <main
-          id="main-content"
-          className={`main-content ${location.pathname.includes('/room') ? 'room-content' : ''}`}
-        >
+        <main id="main-content" className={`main-content ${inRoom ? 'room-content' : ''}`}>
           <Outlet />
         </main>
         <footer className="footer">
@@ -212,6 +229,30 @@ export default function Shell() {
           </span>
         </footer>
       </div>
+      {isPhone && !inRoom && (
+        <nav className="mobile-tabbar" aria-label="手机主导航" inert={open ? true : undefined}>
+          {[
+            { to: '/dashboard', label: '首页', icon: LayoutDashboard },
+            { to: '/history', label: '记录', icon: History },
+            { to: '/interviews/new', label: '开始面试', icon: Plus },
+            { to: '/billing', label: '权益', icon: Wallet },
+            { to: '/profile', label: '我的', icon: UserRound },
+          ].map(({ to, label, icon: Icon }) => (
+            <NavLink
+              key={to}
+              to={to}
+              className={({ isActive }) =>
+                `mobile-tab ${to === '/interviews/new' ? 'mobile-tab-create' : ''} ${isActive ? 'active' : ''}`
+              }
+            >
+              <span>
+                <Icon size={22} />
+              </span>
+              {label}
+            </NavLink>
+          ))}
+        </nav>
+      )}
       <Modal
         title={
           <span className="inline">

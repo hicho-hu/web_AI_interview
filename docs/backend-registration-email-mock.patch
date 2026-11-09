@@ -1,0 +1,230 @@
+diff --git a/.env.example b/.env.example
+--- a/.env.example
++++ b/.env.example
+@@ -65,6 +65,10 @@
+ # 邮箱注册：开发 preview 明确展示本地验证码，不发送真实邮件。
+ # 生产暂不使用邮件时设为 disabled，SMTP 配置可留空；启用邮件时使用 smtp 和加密连接。
+ MAIL_MODE=preview
++# 生产环境临时测试注册：MAIL_MODE=disabled + REGISTRATION_EMAIL_MOCK_ENABLED=true。
++# 只模拟注册邮件，接口/页面展示随机验证码；找回密码和换绑邮箱不受此开关影响。
++# 恢复真实注册时改为 false 并配置 MAIL_MODE=smtp。
++REGISTRATION_EMAIL_MOCK_ENABLED=false
+ # 生成邀请和推广链接的前端根地址；允许 HTTP/HTTPS，同源部署可留空使用相对链接。
+ WEB_BASE_URL=http://127.0.0.1:5173
+ SMTP_HOST=
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -128,6 +128,8 @@
+ 
+ 邮箱注册、邀请奖励与分佣推广已接入，配置和接口见 [邮箱账号与推广](docs/accounts-growth.md)。当前 Web 使用邮箱注册/密码登录；手机号与网页第三方登录暂缓。开发邮件默认预览验证码；生产暂不使用邮件时设置 `MAIL_MODE=disabled`，启用邮件时再配置 SMTP。
+ 
++生产临时测试注册可设置 `MAIL_MODE=disabled` 和 `REGISTRATION_EMAIL_MOCK_ENABLED=true`：页面展示本次随机验证码，正常创建真实账号，未验证邮箱归属。仅注册邮件受此开关影响；找回密码和换绑邮箱不会返回模拟验证码。Docker Compose 已透传该开关，修改环境配置后需重新创建 API 容器。恢复真实注册时关闭该开关并配置 SMTP，详见上述文档。
++
+ ## 阿里云 OSS
+ 
+ 支持 `STORAGE_BACKEND=oss`，通过服务端 STS 按当前用户的单个待上传资产授权；Web 大文件分片上传，后端校验并复制到不可由上传凭证覆盖的 accepted 路径。角色策略、CORS、回放和切换步骤见 [OSS 接入](docs/oss-storage.md)。切换前可在保持本地存储时运行 `python -B scripts/check_oss.py --write-probe`，或在管理后台“系统管理 → 文件存储”检查连接。
+diff --git a/docker-compose.yml b/docker-compose.yml
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -12,6 +12,15 @@
+     S3_SECRET_KEY: local-interview-secret
+     S3_BUCKET: ai-interview
+     PUBLIC_BASE_URL: http://localhost:8000
++    MAIL_MODE: ${MAIL_MODE:-preview}
++    REGISTRATION_EMAIL_MOCK_ENABLED: ${REGISTRATION_EMAIL_MOCK_ENABLED:-false}
++    SMTP_HOST: ${SMTP_HOST:-}
++    SMTP_PORT: ${SMTP_PORT:-587}
++    SMTP_USERNAME: ${SMTP_USERNAME:-}
++    SMTP_PASSWORD: ${SMTP_PASSWORD:-}
++    SMTP_FROM: ${SMTP_FROM:-}
++    SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
++    SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+     PROVIDER_MODE: ${PROVIDER_MODE:-mock}
+     PROVIDER_URL: ${PROVIDER_URL:-}
+     PROVIDER_API_KEY: ${PROVIDER_API_KEY:-${DASHSCOPE_API_KEY:-}}
+diff --git a/app/core/config.py b/app/core/config.py
+--- a/app/core/config.py
++++ b/app/core/config.py
+@@ -47,6 +47,8 @@
+     provider_cost_limit_microunits: int = Field(2_000_000, ge=1)
+     global_daily_cost_limit_microunits: int = Field(100_000_000, ge=1)
+     mail_mode: Literal["smtp", "preview", "disabled"] = "preview"
++    # 临时注册测试：只模拟注册邮件，响应直接返回本次验证码；不影响找回密码或换绑邮箱。
++    registration_email_mock_enabled: bool = False
+     smtp_host: str = ""
+     smtp_port: int = Field(587, ge=1, le=65535)
+     smtp_username: str = ""
+diff --git a/app/providers/mail.py b/app/providers/mail.py
+--- a/app/providers/mail.py
++++ b/app/providers/mail.py
+@@ -1,4 +1,4 @@
+-"""SMTP email verification with an explicitly labelled, non-production preview mode."""
++"""SMTP delivery, development previews, and opt-in registration-only test codes."""
+ 
+ import smtplib
+ import ssl
+@@ -8,6 +8,8 @@
+ 
+ 
+ def deliver_code(settings, email, code, purpose):
++    if purpose == "REGISTER" and settings.registration_email_mock_enabled:
++        return {"delivery": "registration_mock", "mock_code": code}
+     require(settings.mail_mode != "disabled", "EMAIL_NOT_CONFIGURED", "邮件服务未配置", 503)
+     if settings.mail_mode == "preview":
+         require(
+diff --git a/docs/accounts-growth.md b/docs/accounts-growth.md
+--- a/docs/accounts-growth.md
++++ b/docs/accounts-growth.md
+@@ -21,6 +21,19 @@
+ 使用 SSL 端口时设置 `SMTP_USE_SSL=true` 与对应端口。生产环境启用 SMTP 时必须配置服务器、发件地址和加密连接，不允许返回预览验证码。`WEB_BASE_URL` 只用于生成邀请和推广链接，允许 HTTP/HTTPS，也可留空生成同源相对链接。邮件由服务端 SMTP 发送，浏览器不接触 SMTP 密码。不要将真实密码提交到仓库。
+ 
+ 暂不使用邮件时可设置 `MAIL_MODE=disabled`，SMTP 参数可留空，服务仍可启动。发送注册、找回密码和绑定邮箱验证码会返回 HTTP 503 / `EMAIL_NOT_CONFIGURED`；已有账号的邮箱密码登录仍可使用。
++
++### 生产环境临时测试注册
++
++没有 SMTP 时，可以显式开启仅用于注册的邮件模拟能力（默认关闭）：
++
++```dotenv
++MAIL_MODE=disabled
++REGISTRATION_EMAIL_MOCK_ENABLED=true
++```
++
++更新后端代码和运行环境配置并重启 API 服务；使用 Docker 时需重新创建容器以加载新环境变量。前端也需重新构建部署。注册页点击“发送验证码”后，接口返回 `delivery=registration_mock` 与 `mock_code`，页面显示“注册测试模式”、本次随机验证码和“未发送真实邮件，未验证邮箱归属”。输入该验证码后按正常流程注册，账号、密码、邀请归因及权益仍写入真实数据库，之后可用邮箱密码登录。此开关可用于 production，不需要将 `ENVIRONMENT` 改为 development。
++
++该开关只覆盖 `REGISTER` 邮件发送；找回密码、绑定或换绑邮箱仍取决于 `MAIL_MODE`，disabled 时继续返回 503，smtp 时发送真实邮件且不返回验证码。验证码仍保持随机生成、有效期、次数限制、邮箱与用途绑定及一次性消费。测试注册不证明邮箱归属，测试期间请使用专用测试邮箱。准备启用真实邮件时设置 `REGISTRATION_EMAIL_MOCK_ENABLED=false` 和 `MAIL_MODE=smtp` 并补齐 SMTP 配置、重启服务，即可恢复真实发送。
+ 
+ 验证码有效期 10 分钟；同一邮箱 60 秒内不可重复发送，每小时最多 5 次，来源 IP 每小时最多 20 次。验证码最多校验 5 次，与用途、目标邮箱及绑定操作账号关联，一次性消费。错误次数通过 Redis（生产必需）保留，不能通过失败请求回滚绕过。
+ 
+diff --git a/tests/test_mail_config.py b/tests/test_mail_config.py
+--- a/tests/test_mail_config.py
++++ b/tests/test_mail_config.py
+@@ -45,6 +45,20 @@
+         Settings(_env_file=None, **production_config)
+ 
+ 
++def test_production_registration_mock_is_opt_in_and_needs_no_smtp(production_config):
++    production_config.update(mail_mode="disabled", smtp_host="", smtp_from="")
++    assert not Settings(_env_file=None, **production_config).registration_email_mock_enabled
++    production_config["registration_email_mock_enabled"] = True
++    settings = Settings(_env_file=None, **production_config)
++    assert settings.registration_email_mock_enabled
++    assert settings.environment == "production"
++
++
++def test_registration_mock_can_be_enabled_from_environment(production_config, monkeypatch):
++    monkeypatch.setenv("REGISTRATION_EMAIL_MOCK_ENABLED", "true")
++    assert Settings(_env_file=None, **production_config).registration_email_mock_enabled
++
++
+ @pytest.mark.parametrize(
+     "missing",
+     [
+diff --git a/tests/test_email_accounts.py b/tests/test_email_accounts.py
+--- a/tests/test_email_accounts.py
++++ b/tests/test_email_accounts.py
+@@ -185,7 +185,12 @@
+     )
+ 
+ 
+-def test_smtp_delivery_returns_no_preview_code(client, monkeypatch):
++@pytest.mark.parametrize(
++    "purpose,mock_enabled",
++    [("REGISTER", False), ("RESET_PASSWORD", True), ("BIND_EMAIL", True)],
++)
++def test_smtp_delivery_returns_no_preview_code(client, monkeypatch, purpose, mock_enabled):
++    headers, _ = login(client) if purpose == "BIND_EMAIL" else ({}, None)
+     messages = []
+ 
+     class SMTP:
+@@ -206,11 +211,14 @@
+ 
+     monkeypatch.setattr("app.providers.mail.smtplib.SMTP", SMTP)
+     settings = client.app.state.runtime.settings
++    settings.environment = "production"
+     settings.mail_mode = "smtp"
++    settings.registration_email_mock_enabled = mock_enabled
+     settings.smtp_host = "smtp.example.com"
+     settings.smtp_from = "noreply@example.com"
+-    result = data(client.post("/api/v1/auth/email-code", json={"email": "recipient@example.com"}))
+-    assert result["delivery"] == "smtp" and "development_code" not in result
++    result = email_code(client, "recipient@example.com", purpose, headers or None)
++    assert result["delivery"] == "smtp"
++    assert "development_code" not in result and "mock_code" not in result
+     assert len(messages) == 1 and messages[0]["To"] == "recipient@example.com"
+ 
+ 
+@@ -219,6 +227,73 @@
+     response = client.post("/api/v1/auth/email-code", json={"email": "recipient@example.com"})
+     assert response.status_code == 503
+     assert "development_code" not in response.text
++
++
++def test_production_registration_mock_creates_real_account_without_smtp(client, monkeypatch):
++    settings = client.app.state.runtime.settings
++    settings.environment = "production"
++    settings.mail_mode = "disabled"
++    settings.registration_email_mock_enabled = True
++
++    def unexpected_delivery(*args, **kwargs):
++        pytest.fail("注册模拟模式不应连接 SMTP")
++
++    monkeypatch.setattr("app.providers.mail.smtplib.SMTP", unexpected_delivery)
++    monkeypatch.setattr("app.providers.mail.smtplib.SMTP_SSL", unexpected_delivery)
++    code = email_code(client, "mock-register@example.com")
++    assert code["delivery"] == "registration_mock"
++    assert len(code["mock_code"]) == 6 and code["mock_code"].isdigit()
++    assert "development_code" not in code
++    payload = {
++        "email": "mock-register@example.com",
++        "password": PASSWORD,
++        "code": code["mock_code"],
++        "challenge_id": code["challenge_id"],
++        "agreed": True,
++    }
++    wrong = "000000" if code["mock_code"] != "000000" else "111111"
++    invalid = client.post("/api/v1/auth/email-register", json={**payload, "code": wrong})
++    assert invalid.status_code == 400 and invalid.json()["code"] == "EMAIL_CODE_INVALID"
++    assert client.post(
++        "/api/v1/auth/email-register", json={**payload, "email": "other@example.com"}
++    ).status_code == 400
++    registered = data(client.post("/api/v1/auth/email-register", json=payload), 201)
++    signed = data(
++        client.post("/api/v1/auth/email-login", json={"email": payload["email"], "password": PASSWORD})
++    )
++    assert registered["user"]["id"] == signed["user"]["id"]
++    assert client.post("/api/v1/auth/email-register", json=payload).status_code == 409
++    with client.app.state.runtime.db.session() as db:
++        challenge = db.get(EmailChallenge, code["challenge_id"])
++        assert challenge.used_at is not None
++        assert challenge.code_hash != code["mock_code"]
++        assert db.scalar(select(UserAccount).where(UserAccount.user_id == registered["user"]["id"]))
++
++
++@pytest.mark.parametrize("purpose", ["RESET_PASSWORD", "BIND_EMAIL"])
++def test_registration_mock_does_not_expose_recovery_or_binding_codes(client, monkeypatch, purpose):
++    headers, _ = login(client) if purpose == "BIND_EMAIL" else ({}, None)
++    settings = client.app.state.runtime.settings
++    settings.environment = "production"
++    settings.mail_mode = "disabled"
++    settings.registration_email_mock_enabled = True
++
++    def unexpected_delivery(*args, **kwargs):
++        pytest.fail("禁用邮件时不应连接 SMTP")
++
++    monkeypatch.setattr("app.providers.mail.smtplib.SMTP", unexpected_delivery)
++    monkeypatch.setattr("app.providers.mail.smtplib.SMTP_SSL", unexpected_delivery)
++    path = "/api/v1/users/me/email-code" if headers else "/api/v1/auth/email-code"
++    response = client.post(
++        path,
++        headers=headers,
++        json={"email": "recipient@example.com", **({} if headers else {"purpose": purpose})},
++    )
++    assert response.status_code == 503
++    assert response.json()["code"] == "EMAIL_NOT_CONFIGURED"
++    assert "mock_code" not in response.text and "development_code" not in response.text
++    with client.app.state.runtime.db.session() as db:
++        assert db.scalar(select(EmailChallenge.id)) is None
+ 
+ 
+ @pytest.mark.parametrize("purpose", ["REGISTER", "RESET_PASSWORD", "BIND_EMAIL"])

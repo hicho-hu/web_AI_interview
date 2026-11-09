@@ -1133,7 +1133,7 @@ select:focus-visible {
   min-height: 79px;
   transition: background 0.18s;
 }
-.interview-row:last-child {
+.interview-record:last-child .interview-row {
   border-bottom: 0;
 }
 .interview-row:hover {

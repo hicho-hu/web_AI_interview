@@ -14,6 +14,7 @@ import type {
   Mode,
 } from '../types/domain';
 import { ApiError } from './client';
+import { randomUUID } from '../utils/uuid';
 import { defaultConfig } from '../features/interviews/schema';
 import { demoCatalog } from '../features/billing/demoCatalog';
 import { availableCredits, creditLabels, creditModes, emptyCredits } from '../features/billing/credits';
@@ -33,7 +34,7 @@ interface DemoData {
 }
 const storageKey = 'interview-demo-v1';
 const now = () => new Date().toISOString();
-const id = () => crypto.randomUUID();
+const id = () => randomUUID();
 function question(title: string, jd: string, index: number, en: boolean) {
   const requirement =
     jd.split(/[。；\n]/).filter(Boolean)[index % jd.split(/[。；\n]/).filter(Boolean).length] || title;

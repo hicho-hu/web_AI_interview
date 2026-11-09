@@ -31,6 +31,7 @@ import { uploadFile } from '../features/media/upload';
 import { ErrorState, PageHeading } from '../components/common/ui';
 import { difficulties, modeLabels } from '../utils/interview';
 import { availableCredits, creditLabels } from '../features/billing/credits';
+import { useDialogFocus } from '../components/common/useDialogFocus';
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 type Occupation = { sn: string; name: string; desc?: string; worktypes?: string[]; majorCode: string; majorName: string; middleCode: string; middleName: string };
@@ -102,6 +103,8 @@ export default function NewInterview() {
   const [agreed, setAgreed] = useState(false);
   const [creationIssue, setCreationIssue] = useState<'consent' | 'quota' | null>(null);
   const [jobPickerOpen, setJobPickerOpen] = useState(false);
+  const jobPickerRef = useRef<HTMLElement>(null);
+  useDialogFocus(jobPickerOpen, jobPickerRef, () => setJobPickerOpen(false));
   const [jobSearch, setJobSearch] = useState('');
   const [jobCategory, setJobCategory] = useState('ALL');
   const [jobMiddle, setJobMiddle] = useState('');
@@ -294,7 +297,12 @@ export default function NewInterview() {
             </div>
             <div className="field">
               岗位名称<span className="required">*</span>
-              <button type="button" className="job-picker-trigger" onClick={() => setJobPickerOpen(true)}>
+              <button
+                type="button"
+                className="job-picker-trigger"
+                aria-haspopup="dialog"
+                onClick={() => setJobPickerOpen(true)}
+              >
                 <BriefcaseBusiness size={17} />
                 <span>{job.job_title || '搜索并选择目标岗位'}</span>
                 <ChevronRight size={17} />
@@ -502,6 +510,17 @@ export default function NewInterview() {
               </div>
             </label>
           </section>
+          <div className="mobile-plan-summary">
+            <strong>
+              {modeLabels[config.mode]} · {config.duration_minutes} 分钟 · {config.question_count} 道题
+            </strong>
+            <span>
+              本次预占 1 次{creditLabels[config.mode]}面试 · 可用 {user ? availableCredits(user, config.mode) : '—'} 次
+            </span>
+            <Link className="text-link" to="/billing">
+              查看或购买权益<ArrowRight size={14} />
+            </Link>
+          </div>
           <label className="agreement create-agreement">
             <input
               ref={agreementInput}
@@ -615,12 +634,12 @@ export default function NewInterview() {
         <div className="job-picker-backdrop" role="presentation" onMouseDown={(e) => {
           if (e.target === e.currentTarget) setJobPickerOpen(false);
         }}>
-          <section className="job-picker-modal" role="dialog" aria-modal="true" aria-labelledby="job-picker-title">
+          <section ref={jobPickerRef} className="job-picker-modal" role="dialog" aria-modal="true" aria-labelledby="job-picker-title">
             <header>
               <div><span>选择你的方向</span><h2 id="job-picker-title">选择目标岗位</h2></div>
               <button className="icon-btn" type="button" aria-label="关闭" onClick={() => setJobPickerOpen(false)}><X size={19} /></button>
             </header>
-            <label className="job-picker-search"><Search size={17} /><input autoFocus value={jobSearch} onChange={(e) => setJobSearch(e.target.value)} placeholder="搜索岗位名称或职责关键词" /></label>
+            <label className="job-picker-search"><Search size={17} /><input data-dialog-focus value={jobSearch} onChange={(e) => setJobSearch(e.target.value)} placeholder="搜索岗位名称或职责关键词" /></label>
             <div className="job-picker-tree">
               <nav aria-label="一级行业"><button type="button" className={jobCategory === 'ALL' ? 'selected' : ''} onClick={() => { setJobCategory('ALL'); setJobMiddle(''); }}>全部行业</button>{majorOptions.map(([code, name]) => <button type="button" key={code} className={jobCategory === code ? 'selected' : ''} onClick={() => { setJobCategory(code); setJobMiddle(''); }}>{name || occupationCategories[code] || `行业 ${code}`}</button>)}</nav>
               <nav aria-label="二级岗位类目">{middleOptions.map(([code, name]) => <button type="button" key={code} className={jobMiddle === code ? 'selected' : ''} onClick={() => setJobMiddle(code)}>{name}</button>)}</nav>

@@ -8,6 +8,7 @@ import {
   Video,
   Inbox,
   RotateCcw,
+  Trash2,
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import type { Interview, Mode } from '../../types/domain';
@@ -90,7 +91,15 @@ export function ModeIcon({ mode, size = 18 }: { mode: Mode; size?: number }) {
   const Icon = mode === 'TEXT' ? MessageSquare : mode === 'VOICE' ? Mic : Video;
   return <Icon size={size} />;
 }
-export function InterviewRows({ items }: { items: Interview[] }) {
+export function InterviewRows({
+  items,
+  onRemove,
+  deleting,
+}: {
+  items: Interview[];
+  onRemove?: (item: Interview) => void;
+  deleting?: boolean;
+}) {
   return (
     <div className="interview-table">
       <div className="table-head">
@@ -101,36 +110,49 @@ export function InterviewRows({ items }: { items: Interview[] }) {
         <span />
       </div>
       {items.map((item) => (
-        <Link className="interview-row" key={item.id} to={interviewLink(item)}>
-          <div className="job-cell">
-            <span className={`job-avatar mode-${item.mode.toLowerCase()}`}>
-              <ModeIcon mode={item.mode} size={21} />
-            </span>
-            <div>
-              <strong>{item.job_title}</strong>
-              <small>
-                {item.config.duration_minutes} 分钟 · {item.config.question_count} 道主问题
-              </small>
-            </div>
-          </div>
-          <span className="table-mode">{modeLabels[item.mode]}</span>
-          <span className="table-date">
-            {dateText(item.created_at, { year: 'numeric', month: '2-digit', day: '2-digit' })}
-          </span>
-          <span>
-            {item.overall_score !== null ? (
-              <b className="score-inline">
-                {item.overall_score}
-                <small> 分</small>
-              </b>
-            ) : (
-              <span className={`status status-${item.status.toLowerCase()}`}>
-                {statusLabels[item.status]}
+        <div className={`interview-record ${onRemove ? 'has-delete' : ''}`} key={item.id}>
+          <Link className="interview-row" to={interviewLink(item)}>
+            <div className="job-cell">
+              <span className={`job-avatar mode-${item.mode.toLowerCase()}`}>
+                <ModeIcon mode={item.mode} size={21} />
               </span>
-            )}
-          </span>
-          <ArrowRight className="row-arrow" size={17} />
-        </Link>
+              <div>
+                <strong>{item.job_title}</strong>
+                <small>
+                  {item.config.duration_minutes} 分钟 · {item.config.question_count} 道主问题
+                </small>
+              </div>
+            </div>
+            <span className="table-mode">{modeLabels[item.mode]}</span>
+            <span className="table-date">
+              {dateText(item.created_at, { year: 'numeric', month: '2-digit', day: '2-digit' })}
+            </span>
+            <span>
+              {item.overall_score !== null ? (
+                <b className="score-inline">
+                  {item.overall_score}
+                  <small> 分</small>
+                </b>
+              ) : (
+                <span className={`status status-${item.status.toLowerCase()}`}>
+                  {statusLabels[item.status]}
+                </span>
+              )}
+            </span>
+            <ArrowRight className="row-arrow" size={17} />
+          </Link>
+          {onRemove && (
+            <button
+              className="icon-btn delete-record"
+              aria-label={`删除 ${item.job_title} 面试`}
+              title="删除面试"
+              disabled={deleting}
+              onClick={() => onRemove(item)}
+            >
+              <Trash2 size={15} />
+            </button>
+          )}
+        </div>
       ))}
     </div>
   );

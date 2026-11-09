@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { z } from 'zod';
 import { useSession } from '../stores/session';
+import { randomUUID } from '../utils/uuid';
 
 const envelope = z.object({
   code: z.string(),
@@ -23,7 +24,7 @@ const client = axios.create({ baseURL: import.meta.env.VITE_API_BASE_URL || '/ap
 client.interceptors.request.use((config) => {
   const token = useSession.getState().token;
   if (token) config.headers.Authorization = `Bearer ${token}`;
-  config.headers['X-Request-ID'] = crypto.randomUUID();
+  config.headers['X-Request-ID'] = randomUUID();
   return config;
 });
 export async function request<T>(method: string, path: string, body?: unknown, key?: string): Promise<T> {
@@ -68,7 +69,7 @@ export async function request<T>(method: string, path: string, body?: unknown, k
 // Keep keys in memory for the life of an operation. Failed requests reuse the same key.
 const keys = new Map<string, string>();
 export function operationKey(scope: string) {
-  if (!keys.has(scope)) keys.set(scope, crypto.randomUUID());
+  if (!keys.has(scope)) keys.set(scope, randomUUID());
   return keys.get(scope)!;
 }
 export function completeOperation(scope: string) {

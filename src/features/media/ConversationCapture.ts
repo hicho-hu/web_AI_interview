@@ -4,6 +4,7 @@ import { VoiceActivity, type Utterance } from './voiceActivity';
 import { signedUrl } from './upload';
 import { fixWebmDuration } from '@fix-webm-duration/fix';
 import { captionsVtt, type CaptionCue } from './captions';
+import { randomUUID } from '../../utils/uuid';
 
 export interface CaptureResult {
   session: SessionRecording;
@@ -57,7 +58,7 @@ export class ConversationCapture {
     private callbacks: Callbacks,
   ) {
     this.session = {
-      id: crypto.randomUUID(),
+      id: randomUUID(),
       userId,
       interviewId,
       mode,
