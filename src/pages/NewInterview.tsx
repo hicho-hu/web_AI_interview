@@ -32,6 +32,7 @@ import { ErrorState, PageHeading } from '../components/common/ui';
 import { difficulties, modeLabels } from '../utils/interview';
 import { availableCredits, creditLabels } from '../features/billing/credits';
 import { useDialogFocus } from '../components/common/useDialogFocus';
+import { readyJob } from '../features/jobs/prepare';
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 type Occupation = { sn: string; name: string; desc?: string; worktypes?: string[]; majorCode: string; majorName: string; middleCode: string; middleName: string };
@@ -80,15 +81,6 @@ async function loadOccupations(): Promise<Occupation[]> {
     }
   }
   throw lastError ?? new Error('职业目录暂时无法加载');
-}
-async function readyJob(id: string) {
-  for (let i = 0; i < 90; i++) {
-    const job = await api.job(id);
-    if (job.status === 'READY') return job;
-    if (job.status === 'FAILED') throw new Error('岗位解析失败，请检查 JD 内容或到后端检查任务');
-    await wait(1500);
-  }
-  throw new Error('岗位解析耗时较长，请稍后重试；已有岗位将继续使用');
 }
 export default function NewInterview() {
   const [job, setJob] = useState<JobInput>({ job_title: '', jd_text: '', seniority: 'MIDDLE' });
@@ -245,7 +237,7 @@ export default function NewInterview() {
         const created = await api.createJob(parsed.data);
         cachedJob.current = { payload, id: created.id };
       }
-      const ready = await readyJob(cachedJob.current!.id);
+      const ready = await readyJob(cachedJob.current!.id, { onProgress: setPhase });
       setPhase('正在生成专属面试计划');
       const input = {
         job_profile_id: ready.id,
@@ -296,7 +288,15 @@ export default function NewInterview() {
               <FileText size={20} />
             </div>
             <div className="field">
-              岗位名称<span className="required">*</span>
+              <label htmlFor="job-title">岗位名称<span className="required">*</span></label>
+              <input
+                id="job-title"
+                required
+                maxLength={100}
+                value={job.job_title}
+                onChange={(e) => setJob({ ...job, job_title: e.target.value })}
+                placeholder="填写目标岗位，也可以从职业目录选择"
+              />
               <button
                 type="button"
                 className="job-picker-trigger"
@@ -304,7 +304,7 @@ export default function NewInterview() {
                 onClick={() => setJobPickerOpen(true)}
               >
                 <BriefcaseBusiness size={17} />
-                <span>{job.job_title || '搜索并选择目标岗位'}</span>
+                <span>从职业目录选择岗位</span>
                 <ChevronRight size={17} />
               </button>
             </div>

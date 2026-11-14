@@ -57,6 +57,6 @@ React 19 + TypeScript + Vite SPA；React Router 管理受保护路由；TanStack
 
 ## 接口边界
 
-网页微信扫码登录缺少后端接口。现有 wechat-login 是小程序 jscode2session，不能冒充 Web 登录；生产构建隐藏开发登录，保留独立演示模式。我的权益页支持套餐购买和模拟支付，复用后端 billing 的商品、订单、dev-pay 和 entitlements 接口；由后端原子更新订单并发放权益，前端不自行增加真实账号额度。创建键跨刷新复用，响应丢失先核对订单状态；待支付订单可续付。生产后端禁用 dev-pay，微信与支付宝展示暂不可用。Mock AI 报告清晰提示模拟结果，不表示实际能力评估。PDF 导出为后续增强，当前提供浏览器打印。禁止把模型密钥、个人资料或录音录像提交到 Git。
+网页微信扫码登录缺少后端接口。现有 wechat-login 是小程序 jscode2session，不能冒充 Web 登录；体验登录由 VITE_ENABLE_DEV_LOGIN / DEV_LOGIN_ENABLED 控制，所有构建一致，保留独立演示模式。我的权益页支持套餐购买和模拟支付，复用后端 billing 的商品、订单、dev-pay 和 entitlements 接口；由后端原子更新订单并发放权益，前端不自行增加真实账号额度。创建键跨刷新复用，响应丢失先核对订单状态；待支付订单可续付。后端 MOCK_PAYMENT_ENABLED 开启时所有环境均可模拟购买；微信与支付宝真实收款尚未接入，展示暂不可用。Mock AI 报告清晰提示模拟结果，不表示实际能力评估。PDF 导出为后续增强，当前提供浏览器打印。禁止把模型密钥、个人资料或录音录像提交到 Git。
 
 参考：[Vite 文档](https://vite.dev/guide/)、[TanStack Query](https://tanstack.com/query/latest/docs/framework/react/guides/queries)、[MediaRecorder](https://developer.mozilla.org/en-US/docs/Web/API/MediaRecorder)。

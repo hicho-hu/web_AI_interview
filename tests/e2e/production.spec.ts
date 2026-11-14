@@ -1,10 +1,10 @@
 import { test, expect } from '@playwright/test';
 test.skip(!process.env.PRODUCTION_PREVIEW, '仅验证已构建的生产产物');
-test('生产构建隐藏开发登录，独立演示和路由分包可运行', async ({ page }) => {
+test('生产构建保留已配置的体验登录，独立演示和路由分包可运行', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto('/login');
-  await expect(page.getByRole('button', { name: '进入我的练习空间' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '进入我的练习空间' })).toBeVisible();
   await expect(page.getByRole('button', { name: '使用邮箱登录', exact: true })).toBeVisible();
   await page.getByRole('checkbox').check();
   await page.getByRole('button', { name: '体验文字面试演示' }).click();

@@ -10,6 +10,7 @@ type Scenario =
   | 'price-change'
   | 'split-change'
   | 'disabled'
+  | 'capability'
   | 'balance-error';
 async function fixture(page: Page, scenario: Scenario) {
   const user: User = {
@@ -23,6 +24,10 @@ async function fixture(page: Page, scenario: Scenario) {
   };
   const catalog: ProductCatalog = structuredClone(demoCatalog);
   if (scenario === 'disabled') catalog.development_mock_payment = false;
+  if (scenario === 'capability') {
+    catalog.development_mock_payment = false;
+    catalog.mock_payment_enabled = true;
+  }
   const state = {
     user,
     orders: [] as BillingOrder[],
@@ -259,4 +264,14 @@ test('分类组合变化但总次数和金额相同时，也必须重新确认�
   await expectSuccess(page, 10);
   await expect(page.getByRole('region', { name: '文字面试权益' })).toContainText('6');
   await expect(page.getByRole('region', { name: '语音面试权益' })).toContainText('2');
+});
+
+
+test('购买能力由开关控制，不受旧开发环境标记限制', async ({ page }) => {
+  const state = await fixture(page, 'capability');
+  await openPack(page);
+  await confirm(page).click();
+  await expectSuccess(page, 10);
+  expect(state.createCalls).toBe(1);
+  expect(state.payCalls).toBe(1);
 });

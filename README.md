@@ -14,7 +14,7 @@ npm run dev
 
 打开 **http://127.0.0.1:5173**。Vite 将 `/api` 反向代理到 `http://127.0.0.1:8000`，避免本地跨域。后端需持续运行且异步任务处理器可用。`.env.local` 中可修改 `API_PROXY_TARGET`。
 
-- **开发登录**：输入自定义测试账号标识，同一标识可恢复同一后端账号；勾选协议后进入真实接口模式。此入口只在 Vite 开发模式启用。
+- **开发登录**：输入自定义测试账号标识，同一标识可恢复同一后端账号；勾选协议后进入真实接口模式。此入口由 `VITE_ENABLE_DEV_LOGIN` 控制，开发和生产构建行为一致，后端需启用 `DEV_LOGIN_ENABLED`。
 - **演示模式**：无需后端，独立体验岗位定制文字题、追问、暂停/恢复、报告和历史复盘。数据保存在当前浏览器 localStorage；不上传简历、不录制媒体、不虚构评分。
 - 若页面显示「本地演示 · 未连接后端」，点击提示条的「连接真实后端」，输入测试账号标识后使用「进入我的练习空间」登录；成功后会显示「真实后端已连接」。演示入口不发送后端业务请求。
 - 真实服务失败会显示错误，不自动替换为演示结果。真实 token 仅保存在当前 tab 的 sessionStorage，退出或 401 清理会话。
@@ -43,7 +43,7 @@ npm run dev
 
 真实模式复用现有 FastAPI `/billing/products`、`/billing/orders`、`/billing/orders/{id}/dev-pay` 与 `/billing/entitlements`。订单固化购买时的类型次数组合，购买后按类型分别到账。创建面试优先预占对应类型次数，不足时可使用保留的历史通用次数；取消未开始的面试和准备失败会返还原类型次数，开始后视为已消费。后台可配置各类型次数并按指定类型补发。订单与权益真实持久化；服务端支付成功和额度发放在同一事务中执行，重复回调不重复加额度。购买后刷新权益页、侧栏及创建页的可用次数。失败后可在购买记录继续同一笔订单；创建请求的幂等键保存在当前 tab，刷新后重试不会新建同一笔订单。订单信息变化时先再次确认，余额刷新失败时保留购买成功结果并提供单独同步。
 
-演示模式使用当前浏览器的订单和额度，不向后端发送请求。服务端 `development_mock_payment` 开启时才允许模拟支付；现有后端在 production 环境拒绝 `dev-pay`，真实微信和支付宝尚未接入。
+演示模式使用当前浏览器的订单和额度，不向后端发送请求。服务端 `mock_payment_enabled` 开启时允许模拟支付，兼容旧的 `development_mock_payment` 字段；开发和 production 行为一致，真实微信和支付宝尚未接入。
 
 ```sh
 npm run test:e2e -- tests/e2e/billing.spec.ts
@@ -82,7 +82,7 @@ docker run --rm -p 8080:80 interview-studio-web
 
 ## 当前边界
 
-登录注册现使用邮箱验证码注册、邮箱和密码登录；生产构建隐藏开发登录，SMTP 需在后端配置。权益支持模拟支付购买，真实微信与支付宝尚未接入。打印调用浏览器打印，不是服务端 PDF 导出。真机 Chrome/Safari/Edge 的实际麦克风、摄像头和生产云存储仍需部署后验收。报告中的「无法判断」不会作为 0 分参与雷达图。
+登录注册现使用邮箱验证码注册、邮箱和密码登录；体验登录由前后端开关控制；邮件按后端的 `preview`、`smtp` 或 `disabled` 配置运行，生产不再单独禁用。权益支持模拟支付购买，真实微信与支付宝尚未接入。打印调用浏览器打印，不是服务端 PDF 导出。真机 Chrome/Safari/Edge 的实际麦克风、摄像头和生产云存储仍需部署后验收。报告中的「无法判断」不会作为 0 分参与雷达图。
 
 分类权益后端增量迁移为 `b72e4f6d9102`，执行 `alembic upgrade head`；对应 SQL 为后端 `docs/sql/update_typed_interview_credits_mysql.sql`。API 中 `remaining_interviews` 是三类可用次数加历史通用次数的总和，创建页按所选类型单独核对；完整契约见后端 `docs/typed-entitlements.md`。
 
@@ -114,3 +114,10 @@ REGISTRATION_MOCK_E2E=1 PRODUCTION_PREVIEW=1 API_PROXY_TARGET=http://127.0.0.1:8
 ```sh
 /path/to/backend/.venv/bin/python scripts/verify_growth.py /path/to/backend --admin-dir /path/to/admin --ffprobe /path/to/ffprobe
 ```
+
+
+## 开发初期的生产流程验证
+
+后端 `TASK_FALLBACK_ENABLED=true` 时，单独运行 API 即可消费持久化任务，无需先启动 Celery Worker 和 Beat。`MOCK_PAYMENT_ENABLED=true` 允许模拟购买并持久化权益，不产生真实扣款；`ENVIRONMENT=production` 不会单独禁用这些功能。
+
+使用后端虚拟环境执行 `scripts/verify_backend.py /path/to/backend --production`，可用临时 SQLite、模拟 AI 和不依赖 Celery 的 production 后端验证购买、语音及视频创建。岗位解析使用截止时间取消未返回的请求；失败任务原地重试一次，保留已有岗位。

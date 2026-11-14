@@ -382,7 +382,7 @@ export default function Login() {
           </form>
           {devLoginEnabled && (
             <p className="login-divider">
-              <span>本地开发入口</span>
+              <span>体验账号入口</span>
             </p>
           )}
           {devLoginEnabled ? (

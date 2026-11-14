@@ -57,7 +57,7 @@ export default function Billing() {
   const usage = useQuery({ queryKey: ['usage-rewards', userId], queryFn: api.rewardUsage });
   const referralRewards = (usage.data ?? []).filter((item) => rewardUsageTypes.has(item.usage_type));
   const orders = useQuery({ queryKey: ['orders', userId, page], queryFn: () => api.orders(page) });
-  const canPay = catalog.data?.development_mock_payment === true;
+  const canPay = (catalog.data?.mock_payment_enabled ?? catalog.data?.development_mock_payment) === true;
 
   function openCheckout(product: Product, order?: BillingOrder) {
     if (locked.current) return;
@@ -133,7 +133,7 @@ export default function Billing() {
       }
       if (useSession.getState().user?.id !== userId) return;
       setPhase('paying');
-      // This authenticated development endpoint simulates a successful callback.
+      // This authenticated endpoint simulates a successful callback when enabled.
       // The server changes the order and grants the credits in one transaction.
       const paid = await api.mockPay(order.id, `mock-pay:${userId}:${order.id}`);
       if (paid.status !== 'PAID') throw new Error('尚未确认支付成功，请重试查询此订单。');

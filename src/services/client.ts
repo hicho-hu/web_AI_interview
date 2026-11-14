@@ -27,12 +27,15 @@ client.interceptors.request.use((config) => {
   config.headers['X-Request-ID'] = randomUUID();
   return config;
 });
-export async function request<T>(method: string, path: string, body?: unknown, key?: string): Promise<T> {
+export async function request<T>(
+  method: string, path: string, body?: unknown, key?: string, options: { signal?: AbortSignal } = {},
+): Promise<T> {
   try {
     const response = await client.request({
       method,
       url: path,
       data: body,
+      signal: options.signal,
       headers: key ? { 'Idempotency-Key': key } : undefined,
     });
     const parsed = envelope.safeParse(response.data);

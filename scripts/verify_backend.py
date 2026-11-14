@@ -18,6 +18,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("backend_directory", type=Path)
     parser.add_argument("--billing-only", action="store_true", help="只验证真实权益购买接口与页面")
+    parser.add_argument("--production", action="store_true", help="验证 production 模式下单 API 的购买、语音和视频创建")
     args = parser.parse_args()
     backend = args.backend_directory.resolve()
     workspace = Path(__file__).resolve().parents[1]
@@ -41,6 +42,26 @@ def main():
             "ISOLATED_BACKEND": "1",
             "RATE_LIMIT_PER_MINUTE": "1000",
         }
+        if args.production:
+            import secrets
+            from cryptography.fernet import Fernet
+            env.update({
+                "ENVIRONMENT": "production",
+                "TASK_MODE": "worker",
+                "TASK_FALLBACK_ENABLED": "true",
+                "TASK_POLL_SECONDS": "0.1",
+                "MOCK_PAYMENT_ENABLED": "true",
+                "DEV_LOGIN_ENABLED": "true",
+                "ADMIN_MFA_REQUIRED": "false",
+                "MAIL_MODE": "preview",
+                "ASR_PROVIDER": "compatible",
+                "TTS_PROVIDER": "compatible",
+                "SECRET_KEY": secrets.token_urlsafe(48),
+                "ENCRYPTION_KEY": Fernet.generate_key().decode(),
+                "LIVE_API": "1",
+                "PRODUCTION_API": "1",
+                "E2E_PORT": "5187",
+            })
         os.environ.update({k: env[k] for k in ("ENVIRONMENT", "DATABASE_URL", "REDIS_URL", "TASK_MODE", "PROVIDER_MODE", "STORAGE_BACKEND", "STORAGE_PATH", "PUBLIC_BASE_URL")})
         from alembic import command
         from alembic.config import Config
@@ -63,8 +84,13 @@ def main():
                     time.sleep(.25)
             else:
                 raise RuntimeError("Isolated backend was not ready")
-            print("Isolated backend ready at :8011 (temporary SQLite, eager worker, mock AI).", flush=True)
-            result = subprocess.run(["npm", "run", "test:e2e:billing:live" if args.billing_only else "test:e2e:live"], cwd=workspace, env=env)
+            print("Isolated backend ready at :8011 (temporary SQLite, " + env["ENVIRONMENT"] + ", " + env["TASK_MODE"] + ", mock AI).", flush=True)
+            command_line = (
+                ["npm", "run", "test:e2e", "--", "tests/e2e/production-flow-live.spec.ts"]
+                if args.production
+                else ["npm", "run", "test:e2e:billing:live" if args.billing_only else "test:e2e:live"]
+            )
+            result = subprocess.run(command_line, cwd=workspace, env=env)
             return result.returncode
         finally:
             process.terminate()

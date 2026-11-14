@@ -53,7 +53,7 @@ async function allPages<T>(path: string): Promise<T[]> {
     if (items.length >= result.total || result.items.length === 0) return items;
   }
 }
-export const devLoginEnabled = import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEV_LOGIN !== 'false';
+export const devLoginEnabled = import.meta.env.VITE_ENABLE_DEV_LOGIN !== 'false';
 export const api = {
   sendEmailCode: (email: string, purpose: 'REGISTER' | 'RESET_PASSWORD' = 'REGISTER', binding = false) =>
     request<{
@@ -157,7 +157,8 @@ export const api = {
   jobs: async () => (demo() ? mock.jobs() : request<Page<Job>>('GET', '/job-profiles?page_size=100')),
   createJob: async (input: JobInput) =>
     demo() ? mock.createJob(input) : request<Job>('POST', '/job-profiles', input),
-  job: async (id: string) => (demo() ? mock.job(id) : request<Job>('GET', `/job-profiles/${id}`)),
+  job: async (id: string, signal?: AbortSignal) =>
+    demo() ? mock.job(id) : request<Job>('GET', `/job-profiles/${id}`, undefined, undefined, { signal }),
   create: async (input: InterviewInput, key: string) =>
     demo()
       ? mock.create(input)
@@ -211,7 +212,8 @@ export const api = {
   },
   task: async (id: string) =>
     demo() ? ({ id, status: 'COMPLETED', error_code: null } as Task) : request<Task>('GET', `/tasks/${id}`),
-  retryTask: async (id: string) => request('POST', `/tasks/${id}/retry`),
+  retryTask: async (id: string, signal?: AbortSignal) =>
+    request('POST', `/tasks/${id}/retry`, undefined, undefined, { signal }),
   resumes: async () =>
     demo()
       ? ({ items: [], total: 0, page: 1, page_size: 20 } as Page<Resume>)

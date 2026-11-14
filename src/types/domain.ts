@@ -40,6 +40,7 @@ export interface ProductCatalog {
   items: Product[];
   payment_enabled: boolean;
   development_mock_payment: boolean;
+  mock_payment_enabled?: boolean;
 }
 export interface Entitlements {
   remaining_interviews: number;
