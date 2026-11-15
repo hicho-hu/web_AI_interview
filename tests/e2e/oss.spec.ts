@@ -46,22 +46,16 @@ for (const multipart of [false, true]) {
       } else throw new Error(`Unexpected API request: ${url.pathname}`);
       await route.fulfill({ json: { code: 'OK', message: 'success', data, request_id: 'oss-test' } });
     });
-    await page.route('https://oss-browser-test.oss-cn-hangzhou.aliyuncs.com/**', async (route) => {
+    await page.route('**/ai-interview/user/**', async (route) => {
       const request = route.request();
       const url = new URL(request.url());
       expect(url.pathname).toBe(`/${objectKey}`);
+      expect(url.origin).toBe(new URL(page.url()).origin);
       const headers = {
-        'access-control-allow-origin': new URL(page.url()).origin,
-        'access-control-allow-headers': '*',
-        'access-control-allow-methods': 'GET,HEAD,PUT,POST,DELETE',
-        'access-control-expose-headers': 'ETag,x-oss-request-id',
         etag: '"browser-verified-etag"',
         'x-oss-request-id': 'synthetic-request-id',
       };
-      if (request.method() === 'OPTIONS') {
-        await route.fulfill({ status: 200, headers });
-        return;
-      }
+      expect(request.method()).not.toBe('OPTIONS');
       expect(request.headers()['x-oss-security-token']).toBe('synthetic-browser-token');
       expect(request.headers().authorization).toMatch(/^OSS /);
       let body = '';

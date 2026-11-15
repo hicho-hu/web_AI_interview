@@ -24,15 +24,20 @@ export async function uploadOSS(
 ): Promise<string | undefined> {
   const grant = await api.ossCredentials(ticket.asset_id);
   checkGrant(grant, ticket);
+  // Keep the object path intact: it is part of the OSS signature. The Web server
+  // forwards this namespace to its fixed bucket, retaining the scoped STS auth.
+  const proxied = import.meta.env.VITE_OSS_UPLOAD_MODE !== 'direct';
+  const endpoint = proxied ? window.location.origin : grant.endpoint;
   const { default: OSS } = await import('ali-oss');
   const client = new OSS({
     region: `oss-${grant.region}`,
-    endpoint: grant.endpoint,
+    endpoint,
+    cname: proxied,
     bucket: grant.bucket,
     accessKeyId: grant.access_key_id,
     accessKeySecret: grant.access_key_secret,
     stsToken: grant.security_token,
-    secure: true,
+    secure: new URL(endpoint).protocol === 'https:',
     timeout: 600000,
     refreshSTSTokenInterval: 300000,
     refreshSTSToken: async () => {
@@ -63,11 +68,16 @@ export async function uploadOSS(
     if (error instanceof ApiError) throw error;
     const status = (error as { status?: number }).status;
     // SDK errors may contain request signatures. Expose only our own messages and status.
+    const missingProxy = proxied && (status === 404 || status === 405);
     throw new ApiError(
-      status === 403
-        ? 'OSS 上传权限不足或授权已过期，请重试；持续失败请联系管理员'
-        : 'OSS 上传未完成，请检查网络；管理员需确认存储跨域设置',
-      'UPLOAD_FAILED',
+      missingProxy
+        ? '文件上传服务未配置，请联系管理员'
+        : status === 403
+          ? '文件上传授权失效或权限不足，请重试；持续失败请联系管理员'
+          : proxied
+            ? '文件上传未完成，请检查网络后重试'
+            : 'OSS 上传未完成，请检查网络；管理员需确认存储跨域设置',
+      missingProxy ? 'UPLOAD_PROXY_UNAVAILABLE' : 'UPLOAD_FAILED',
       undefined,
       status,
     );

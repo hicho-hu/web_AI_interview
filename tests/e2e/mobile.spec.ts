@@ -21,54 +21,26 @@ async function noOverflow(page: Page) {
 test.describe('H5 手机浏览器', () => {
   const { defaultBrowserType: _browser, ...phone } = devices['iPhone 13'];
   test.use(phone);
-  test.beforeEach(async ({ page }) => {
-    await page.route('https://raw.githubusercontent.com/**', (route) =>
-      route.fulfill({
-        json: [
-          {
-            sn: '2',
-            name: '专业技术人员',
-            subclass: [
-              {
-                sn: '2-02',
-                name: '工程技术人员',
-                subclass: [
-                  {
-                    sn: '2-02-10',
-                    name: '软件技术',
-                    subclass: [
-                      { sn: '2-02-10-01', name: '软件工程技术人员', desc: '负责软件设计、开发与测试。' },
-                    ],
-                  },
-                ],
-              },
-            ],
-          },
-        ],
-      }),
-    );
-  });
-
   test('小屏岗位目录逐级选择、确认与关闭后恢复焦点', async ({ page }) => {
     await demoLogin(page);
     await page.setViewportSize({ width: 320, height: 568 });
     await page.goto('/interviews/new');
-    const picker = page.getByRole('button', { name: '搜索并选择目标岗位' });
+    const picker = page.getByRole('button', { name: '从工作职能选择岗位' });
     await picker.click();
     await page
-      .getByRole('navigation', { name: '一级行业' })
-      .getByRole('button', { name: '专业技术人员', exact: true })
+      .getByRole('navigation', { name: '一级职能分类' })
+      .getByRole('button', { name: '互联网技术', exact: true })
       .click();
     await page
-      .getByRole('navigation', { name: '二级岗位类目' })
-      .getByRole('button', { name: '工程技术人员', exact: true })
+      .getByRole('navigation', { name: '二级职能分类' })
+      .getByRole('button', { name: '前端/移动开发', exact: true })
       .click();
-    await page.getByRole('button', { name: /软件工程技术人员.*负责软件设计/ }).click();
+    await page.getByRole('button', { name: '选择 前端开发', exact: true }).click();
     await noOverflow(page);
     await page.screenshot({ path: 'test-results/h5-job-picker.png', fullPage: true });
     await page.getByRole('button', { name: '确认选择', exact: true }).click();
-    await expect(page.locator('.job-picker-trigger')).toHaveText('软件工程技术人员');
-    await expect(page.getByLabel('岗位描述 JD')).toHaveValue(/负责软件设计/);
+    await expect(page.getByLabel('岗位名称')).toHaveValue('前端开发');
+    await expect(page.getByLabel('岗位描述 JD')).toHaveValue('');
     await page.locator('.job-picker-trigger').click();
     await page.keyboard.press('Escape');
     await expect(page.getByRole('dialog')).toHaveCount(0);
@@ -98,10 +70,10 @@ test.describe('H5 手机浏览器', () => {
     await noOverflow(page);
     await page.screenshot({ path: 'test-results/h5-dashboard.png', fullPage: true });
     await tabs.getByRole('link', { name: '开始面试', exact: true }).click();
-    await page.getByRole('button', { name: '搜索并选择目标岗位' }).click();
+    await page.getByRole('button', { name: '从工作职能选择岗位' }).click();
     await expect(page.getByRole('dialog', { name: '选择目标岗位' })).toBeVisible();
     await noOverflow(page);
-    await page.getByPlaceholder('搜索岗位名称或职责关键词').fill('前端工程师');
+    await page.getByPlaceholder('搜索岗位名称或工作职能').fill('前端工程师');
     await page.getByRole('button', { name: '使用自定义岗位' }).click();
     await page.getByLabel('岗位描述 JD').fill('负责 React 组件架构设计，优化性能；协作落地复杂项目。');
     await page.getByLabel('主问题数量').fill('1');

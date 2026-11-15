@@ -33,55 +33,14 @@ import { difficulties, modeLabels } from '../utils/interview';
 import { availableCredits, creditLabels } from '../features/billing/credits';
 import { useDialogFocus } from '../components/common/useDialogFocus';
 import { readyJob } from '../features/jobs/prepare';
+import {
+  filterJobFunctions,
+  jobFunctionGroups,
+  jobFunctionSource,
+  type JobFunction,
+} from '../features/jobs/functionCatalog';
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-type Occupation = { sn: string; name: string; desc?: string; worktypes?: string[]; majorCode: string; majorName: string; middleCode: string; middleName: string };
-const occupationCategories: Record<string, string> = {
-  '1': '党政机关与企事业管理',
-  '2': '专业技术',
-  '3': '办事与行政支持',
-  '4': '社会生产与生活服务',
-  '5': '农林牧渔',
-  '6': '生产制造',
-  '7': '军队',
-  '8': '其他职业',
-};
-const occupationSources = [
-  'https://raw.githubusercontent.com/leo4stone/ZHONGHUARENMINGONGHEGUOZHIYEFENLEIDADIAN/main/04_%E8%81%8C%E4%B8%9A%E5%88%86%E7%B1%BB%E5%A4%A7%E5%85%B82022_hierarchical.json',
-  'https://cdn.jsdelivr.net/gh/leo4stone/ZHONGHUARENMINGONGHEGUOZHIYEFENLEIDADIAN@main/04_%E8%81%8C%E4%B8%9A%E5%88%86%E7%B1%BB%E5%A4%A7%E5%85%B82022_hierarchical.json',
-];
-async function loadOccupations(): Promise<Occupation[]> {
-  let lastError: unknown;
-  for (const source of occupationSources) {
-    try {
-      const response = await fetch(source);
-      if (!response.ok) throw new Error(`职业目录加载失败（${response.status}）`);
-      const data: unknown = await response.json();
-      if (!Array.isArray(data)) throw new Error('职业目录格式无效');
-      const output: Occupation[] = [];
-      type Node = { sn?: string; name?: string; desc?: string; worktypes?: string[]; subclass?: Node[] };
-      for (const rawMajor of data as Node[]) {
-        const majorCode = rawMajor.sn ?? '';
-        for (const middle of rawMajor.subclass ?? []) {
-          const middleCode = middle.sn ?? '';
-          const visit = (node: Node) => {
-            if (node.sn?.split('-').length === 4 && node.name) output.push({
-              sn: node.sn, name: node.name, desc: node.desc, worktypes: node.worktypes,
-              majorCode, majorName: rawMajor.name ?? majorCode,
-              middleCode, middleName: middle.name ?? middleCode,
-            });
-            (node.subclass ?? []).forEach(visit);
-          };
-          visit(middle);
-        }
-      }
-      return output;
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw lastError ?? new Error('职业目录暂时无法加载');
-}
 export default function NewInterview() {
   const [job, setJob] = useState<JobInput>({ job_title: '', jd_text: '', seniority: 'MIDDLE' });
   const [config, setConfig] = useState<Config>({ ...defaultConfig });
@@ -100,32 +59,24 @@ export default function NewInterview() {
   const [jobSearch, setJobSearch] = useState('');
   const [jobCategory, setJobCategory] = useState('ALL');
   const [jobMiddle, setJobMiddle] = useState('');
-  const [selectedOccupations, setSelectedOccupations] = useState<Occupation[]>([]);
+  const [selectedFunctions, setSelectedFunctions] = useState<JobFunction[]>([]);
   const agreementInput = useRef<HTMLInputElement | null>(null);
   const cachedJob = useRef<{ payload: string; id: string } | null>(null);
   const { mode, user, setUser } = useSession();
   const { message } = App.useApp();
   const navigate = useNavigate();
   const jobs = useQuery({ queryKey: ['jobs'], queryFn: api.jobs });
-  const occupationCatalog = useQuery({
-    queryKey: ['occupation-catalog-2022'],
-    queryFn: loadOccupations,
-    enabled: jobPickerOpen,
-    staleTime: Infinity,
-    retry: 1,
-  });
   const query = jobSearch.trim().toLocaleLowerCase();
   const savedJobOptions = (jobs.data?.items ?? []).filter((item) =>
     `${item.job_title} ${item.jd_text}`.toLocaleLowerCase().includes(query),
   );
-  const allOccupations = occupationCatalog.data ?? [];
-  const majorOptions = [...new Map(allOccupations.map((item) => [item.majorCode, item.majorName])).entries()];
-  const middleOptions = [...new Map(allOccupations.filter((item) => jobCategory === 'ALL' || item.majorCode === jobCategory).map((item) => [item.middleCode, item.middleName])).entries()];
-  const leafOptions = allOccupations.filter((item) =>
-    (jobCategory === 'ALL' || item.majorCode === jobCategory) &&
-    (!jobMiddle || item.middleCode === jobMiddle) &&
-    `${item.name} ${item.desc ?? ''} ${(item.worktypes ?? []).join(' ')}`.toLocaleLowerCase().includes(query),
-  ).slice(0, 160);
+  const categoryGroups = jobFunctionGroups.filter((item) => jobCategory === 'ALL' || item.code === jobCategory);
+  const middleOptions = [...new Map(categoryGroups.flatMap((item) => item.children).map((item) => [item.code, item.name])).entries()];
+  const leafOptions = filterJobFunctions({
+    categoryCode: jobCategory === 'ALL' ? undefined : jobCategory,
+    subcategoryCode: jobMiddle || undefined,
+    search: query,
+  });
   function chooseJob(item: Job) {
     setJob({ job_title: item.job_title, jd_text: item.jd_text, seniority: item.seniority });
     cachedJob.current = {
@@ -134,26 +85,27 @@ export default function NewInterview() {
     };
     setJobPickerOpen(false);
   }
-  function toggleOccupation(item: Occupation) {
-    setSelectedOccupations((current) => {
-      if (current.some((selected) => selected.sn === item.sn)) return current.filter((selected) => selected.sn !== item.sn);
-      if (current.length >= 3) { void message.warning('最多选择三个岗位'); return current; }
-      return [...current, item];
+  function toggleFunction(item: JobFunction) {
+    if (!selectedFunctions.some((selected) => selected.code === item.code) && selectedFunctions.length >= 3) {
+      void message.warning('最多选择三个岗位');
+      return;
+    }
+    setSelectedFunctions((current) => {
+      if (current.some((selected) => selected.code === item.code)) return current.filter((selected) => selected.code !== item.code);
+      return current.length < 3 ? [...current, item] : current;
     });
   }
-  function confirmOccupations() {
-    const items = selectedOccupations;
+  function confirmFunctions() {
+    const items = selectedFunctions;
     if (!items.length) return;
-    const profiles = items.map((item) => jobs.data?.items.find((profile) => profile.job_title === item.name));
-    const jdParts = items.map((item, index) => {
-      const saved = profiles[index];
-      if (saved?.jd_text) return `【${item.name}】\n${saved.jd_text}`;
-      const duties = item.worktypes?.length ? `\n相关工种：${item.worktypes.join('、')}` : '';
-      return `【${item.name}】\n${item.desc?.trim() || '可补充目标公司的具体岗位职责和任职要求。'}${duties}`;
-    });
-    const next = { job_title: items.map((item) => item.name).join('、'), jd_text: `${jdParts.join('\n\n')}\n\n请结合目标公司的业务场景和任职要求补充完善。`, seniority: 'MIDDLE' } as JobInput;
+    const saved = items.length === 1 ? jobs.data?.items.find((profile) => profile.job_title === items[0].name) : undefined;
+    const next: JobInput = {
+      ...job,
+      job_title: items.map((item) => item.name).join('、'),
+      jd_text: job.jd_text || saved?.jd_text || '',
+    };
     setJob(next);
-    cachedJob.current = profiles.length === 1 && profiles[0] ? { payload: JSON.stringify({ job_title: profiles[0].job_title, jd_text: profiles[0].jd_text, seniority: profiles[0].seniority }), id: profiles[0].id } : null;
+    cachedJob.current = null;
     setJobPickerOpen(false);
   }
   function changeConfig<K extends keyof Config>(key: K, value: Config[K]) {
@@ -295,7 +247,7 @@ export default function NewInterview() {
                 maxLength={100}
                 value={job.job_title}
                 onChange={(e) => setJob({ ...job, job_title: e.target.value })}
-                placeholder="填写目标岗位，也可以从职业目录选择"
+                placeholder="填写目标岗位，也可以从工作职能选择"
               />
               <button
                 type="button"
@@ -304,7 +256,7 @@ export default function NewInterview() {
                 onClick={() => setJobPickerOpen(true)}
               >
                 <BriefcaseBusiness size={17} />
-                <span>从职业目录选择岗位</span>
+                <span>从工作职能选择岗位</span>
                 <ChevronRight size={17} />
               </button>
             </div>
@@ -639,12 +591,12 @@ export default function NewInterview() {
               <div><span>选择你的方向</span><h2 id="job-picker-title">选择目标岗位</h2></div>
               <button className="icon-btn" type="button" aria-label="关闭" onClick={() => setJobPickerOpen(false)}><X size={19} /></button>
             </header>
-            <label className="job-picker-search"><Search size={17} /><input data-dialog-focus value={jobSearch} onChange={(e) => setJobSearch(e.target.value)} placeholder="搜索岗位名称或职责关键词" /></label>
+            <label className="job-picker-search"><Search size={17} /><input data-dialog-focus aria-label="搜索岗位或工作职能" value={jobSearch} onChange={(e) => setJobSearch(e.target.value)} placeholder="搜索岗位名称或工作职能" /></label>
             <div className="job-picker-tree">
-              <nav aria-label="一级行业"><button type="button" className={jobCategory === 'ALL' ? 'selected' : ''} onClick={() => { setJobCategory('ALL'); setJobMiddle(''); }}>全部行业</button>{majorOptions.map(([code, name]) => <button type="button" key={code} className={jobCategory === code ? 'selected' : ''} onClick={() => { setJobCategory(code); setJobMiddle(''); }}>{name || occupationCategories[code] || `行业 ${code}`}</button>)}</nav>
-              <nav aria-label="二级岗位类目">{middleOptions.map(([code, name]) => <button type="button" key={code} className={jobMiddle === code ? 'selected' : ''} onClick={() => setJobMiddle(code)}>{name}</button>)}</nav>
+              <nav aria-label="一级职能分类"><button type="button" aria-pressed={jobCategory === 'ALL'} className={jobCategory === 'ALL' ? 'selected' : ''} onClick={() => { setJobCategory('ALL'); setJobMiddle(''); }}>全部职能</button>{jobFunctionGroups.map(({ code, name }) => <button type="button" key={code} aria-pressed={jobCategory === code} className={jobCategory === code ? 'selected' : ''} onClick={() => { setJobCategory(code); setJobMiddle(''); }}>{name}</button>)}</nav>
+              <nav aria-label="二级职能分类"><button type="button" aria-pressed={!jobMiddle} className={!jobMiddle ? 'selected' : ''} onClick={() => setJobMiddle('')}>全部细分职能</button>{middleOptions.map(([code, name]) => <button type="button" key={code} aria-pressed={jobMiddle === code} className={jobMiddle === code ? 'selected' : ''} onClick={() => setJobMiddle(code)}>{name}</button>)}</nav>
             <div className="job-picker-results">
-              {selectedOccupations.length > 0 && <div className="job-picker-selected">已选 {selectedOccupations.length}/3：{selectedOccupations.map((item) => <button type="button" key={item.sn} onClick={() => toggleOccupation(item)}>{item.name} ×</button>)}</div>}
+              {selectedFunctions.length > 0 && <div className="job-picker-selected" aria-label="已选岗位">已选 {selectedFunctions.length}/3：{selectedFunctions.map((item) => <button type="button" key={item.code} aria-label={`移除 ${item.name}`} onClick={() => toggleFunction(item)}>{item.name} ×</button>)}</div>}
               {savedJobOptions.map((item) => (
                 <button type="button" className="job-picker-option" key={`saved-${item.id}`} onClick={() => chooseJob(item)}>
                   <span className="job-picker-icon"><BriefcaseBusiness size={18} /></span>
@@ -653,16 +605,16 @@ export default function NewInterview() {
                 </button>
               ))}
               {leafOptions.map((item) => (
-                <button type="button" className={`job-picker-option ${selectedOccupations.some((selected) => selected.sn === item.sn) ? 'selected' : ''}`} key={`occupation-${item.sn}`} onClick={() => toggleOccupation(item)}>
+                <button type="button" aria-label={`选择 ${item.name}`} aria-pressed={selectedFunctions.some((selected) => selected.code === item.code)} className={`job-picker-option ${selectedFunctions.some((selected) => selected.code === item.code) ? 'selected' : ''}`} key={`function-${item.code}`} onClick={() => toggleFunction(item)}>
                   <span className="job-picker-icon"><BriefcaseBusiness size={18} /></span>
-                  <span><strong>{item.name}</strong><small>{item.desc?.slice(0, 110) || '职业分类目录岗位，可补充目标公司的具体 JD'}</small></span>
-                  <span className="job-picker-seniority">{occupationCategories[item.sn.split('-')[0]] ?? '职业目录'}</span>
+                  <span><strong>{item.name}</strong><small>{item.categoryName} / {item.subcategoryName}</small></span>
+                  <span className="job-picker-seniority">{selectedFunctions.some((selected) => selected.code === item.code) ? '已选择' : '选择岗位'}</span>
                 </button>
               ))}
-              {!savedJobOptions.length && !leafOptions.length && <div className="job-picker-empty">{occupationCatalog.isLoading ? '正在加载全行业职业目录…' : occupationCatalog.isError ? <>职业目录暂时加载失败，<button type="button" className="job-picker-retry" onClick={() => void occupationCatalog.refetch()}>点击重试</button>或使用自定义岗位。</> : '没有匹配的岗位，可以使用自定义岗位。'}</div>}
+              {!savedJobOptions.length && !leafOptions.length && <div className="job-picker-empty">没有匹配的岗位，可以切换职能分类或使用自定义岗位。</div>}
               </div>
             </div>
-            <footer><span>职业名称参考《中华人民共和国职业分类大典（2022年版）》</span><button type="button" className="btn primary" onClick={confirmOccupations} disabled={!selectedOccupations.length}>确认选择</button><button type="button" className="btn secondary" onClick={() => {
+            <footer><span>岗位分类参考 <a href={jobFunctionSource.url} target="_blank" rel="noreferrer">前程无忧「工作职能」</a> · 最多选择 3 个岗位</span><button type="button" className="btn primary" onClick={confirmFunctions} disabled={!selectedFunctions.length}>确认选择</button><button type="button" className="btn secondary" onClick={() => {
               setJob((current) => ({ ...current, job_title: current.job_title || jobSearch.trim() }));
               cachedJob.current = null;
               setJobPickerOpen(false);

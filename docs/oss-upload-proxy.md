@@ -1,0 +1,33 @@
+# OSS 上传同源代理
+
+Web 默认将 OSS SDK 的上传请求发送至当前页面 Origin 下的 `/ai-interview/user/{user_id}/incoming/{asset_id}.{ext}`。Web 的 Nginx 或 Vite 将请求转发到固定 OSS Bucket，保留对象路径、查询参数、签名、STS Token、Content-Type 和 ETag。浏览器不再直连 OSS，上传不依赖 Bucket CORS；无需新增 Python 后端接口或修改后端配置。
+
+STS 凭证仍由后端按当前用户、资产和到期时间签发。代理不签发凭证，也不增加 OSS 权限；Bucket 保持私有。长期 RAM 密钥仍只放后端。完成上传后，Web 继续调用原 `/media/{asset_id}/complete`，由后端校验文件并移至不可覆盖的 accepted 路径。
+
+## 当前生产部署
+
+当前默认目标为 `https://ai-interview-storage.oss-cn-hangzhou.aliyuncs.com`，与后端 `OSS_BUCKET_NAME=ai-interview-storage`、`OSS_ENDPOINT=https://oss-cn-hangzhou.aliyuncs.com` 一致。
+
+1. 更新 Web 项目，执行 `npm run build`，部署新的 `dist/`。
+2. 将本项目 `nginx.conf` 中的 OSS `location` 和 `/ai-interview/` 兜底规则加入**实际提供 Web 页面的 server 块**。已有 HTTPS/证书配置保留；`/api` 仍指向原后端。
+3. 执行 `nginx -t`，通过后执行 `nginx -s reload`。Docker 部署重建 Web 镜像并重建容器即可，Dockerfile 已包含完整配置。
+4. 浏览器刷新后上传合成 PDF 测试文件；网络面板应显示 `PUT /ai-interview/user/.../incoming/....pdf` 发往 Web 自身 Origin，随后 `/media/{asset_id}/complete` 成功。8 MB 以上文件会依次发起带 `uploads`、`uploadId`、`partNumber` 的分片请求。
+
+只更新 `dist/`、只更新 Python 后端或只修改后端 `CORS_ORIGINS` 不会安装 Web 上传代理。若外层 Nginx 直接提供静态文件，必须修改外层 Nginx；若外层将整个站点转发至本项目 Web 容器或 Vite，则需让上述路径也转发到该 Web 服务。上传代理占用 Web 服务器带宽。
+
+代理仅转发 incoming 文件命名空间到固定 Bucket，禁止把目标主机改为浏览器传入的任意 URL。`proxy_pass` 后不要添加路径或尾部 `/`，不要重写对象路径和查询参数；它们参与 OSS 签名。须保留 OSS Authorization 和 `x-oss-*` 头，并用 Bucket 域名作为 Host/SNI。Nginx 清除 Origin 和站点 Cookie，以避免把浏览器跨域检查或站点 Cookie 传给 OSS；TLS 证书仍会校验。
+
+## Web 配置
+
+```dotenv
+# 默认值；开发和生产相同。不包含密钥。
+VITE_OSS_UPLOAD_MODE=proxy
+# 仅供 npm run dev / npm run preview 使用。
+OSS_UPLOAD_TARGET=https://ai-interview-storage.oss-cn-hangzhou.aliyuncs.com
+```
+
+更换 Bucket 时同步修改 `OSS_UPLOAD_TARGET` 和生产 `nginx.conf` 中的 `proxy_pass`、`proxy_set_header Host`，使它们与后端保持一致。`OSS_UPLOAD_TARGET` 不会在构建时自动改写 Nginx。
+
+需要恢复浏览器直连时，设置 `VITE_OSS_UPLOAD_MODE=direct` 并重新构建。此模式仍要求 OSS 配置精确的 Web Origin、PUT/POST/GET/HEAD/DELETE、AllowedHeader `*` 及 ExposeHeader `ETag,x-oss-request-id`，参考 [跨域规则模板](oss-cors.xml)。
+
+头像、简历、岗位图片、回答和整场录音录像共享这一上传链路。文件下载暂沿用后端签发的 OSS 下载 URL；本次代理覆盖上传，不改变回放地址。

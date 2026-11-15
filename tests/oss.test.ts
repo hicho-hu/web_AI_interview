@@ -47,6 +47,8 @@ const input: UploadInput = {
 };
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.stubGlobal('window', { location: { origin: 'https://interview.example.com' } });
+  vi.stubEnv('VITE_OSS_UPLOAD_MODE', 'proxy');
   vi.mocked(api.uploadTicket).mockResolvedValue(ticket);
   vi.mocked(api.ossCredentials).mockResolvedValue(grant);
   sdk.put.mockResolvedValue({ res: { headers: { etag: '"verified-etag"' } } });
@@ -65,6 +67,9 @@ it('uploads to the backend asset key and completes only after OSS succeeds', asy
   expect(progress.mock.calls.map(([value]) => value)).toEqual([0, 100]);
   const options = sdk.create.mock.calls[0][0];
   expect(options.secure).toBe(true);
+  expect(options.endpoint).toBe('https://interview.example.com');
+  expect(options.cname).toBe(true);
+  expect(options.bucket).toBe(grant.bucket);
   expect(await options.refreshSTSToken()).toEqual({
     accessKeyId: grant.access_key_id,
     accessKeySecret: grant.access_key_secret,
@@ -100,6 +105,32 @@ it('refreshes an expired grant for the same asset and never exposes SDK request 
   expect(api.ossCredentials).toHaveBeenCalledTimes(2);
   expect(api.completeUpload).toHaveBeenCalledTimes(1);
   sdk.put.mockRejectedValue({ status: 0, message: 'signed-request-secret' });
-  await expect(uploadFile(new Blob(['png']), input, vi.fn())).rejects.toThrow('OSS 上传未完成');
+  await expect(uploadFile(new Blob(['png']), input, vi.fn())).rejects.toThrow('文件上传未完成');
   expect(api.completeUpload).toHaveBeenCalledTimes(1);
+});
+
+it('keeps HTTP proxy uploads on the page origin and supports explicit direct uploads', async () => {
+  vi.stubGlobal('window', { location: { origin: 'http://121.41.206.87:3000' } });
+  await uploadOSS(ticket, new Blob(['png']), vi.fn());
+  expect(sdk.create.mock.calls[0][0]).toMatchObject({
+    endpoint: 'http://121.41.206.87:3000',
+    cname: true,
+    secure: false,
+  });
+  vi.stubEnv('VITE_OSS_UPLOAD_MODE', 'direct');
+  await uploadOSS(ticket, new Blob(['png']), vi.fn());
+  expect(sdk.create.mock.calls[1][0]).toMatchObject({
+    endpoint: grant.endpoint,
+    cname: false,
+    secure: true,
+  });
+});
+
+it('reports a missing Web proxy without leaking SDK details or completing the upload', async () => {
+  sdk.put.mockRejectedValue({ status: 405, message: 'signed-request-secret' });
+  await expect(uploadFile(new Blob(['png']), input, vi.fn())).rejects.toMatchObject({
+    code: 'UPLOAD_PROXY_UNAVAILABLE',
+    message: '文件上传服务未配置，请联系管理员',
+  });
+  expect(api.completeUpload).not.toHaveBeenCalled();
 });
