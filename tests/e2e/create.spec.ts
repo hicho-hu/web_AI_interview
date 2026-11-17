@@ -4,6 +4,7 @@ import type { Interview, InterviewInput, Mode, ModeCredits, User } from '../../s
 
 async function creationFixture(page: Page, initialCredits: number, remaining: number, typed?: ModeCredits) {
   const user: User = {
+    uid: '10000000',
     id: 'creation-fixture',
     nickname: '创建面试验证',
     status: 'ACTIVE',

@@ -32,6 +32,7 @@ test('真实实时链路：WebSocket 字幕、音频校验复用、流式追问�
     };
   });
   await page.goto('/login');
+  await page.getByRole('tab', { name: '体验账号', exact: true }).click();
   await page.getByLabel('测试账号标识').fill(`realtime-synthetic-${Date.now()}`);
   await page.getByLabel('你的称呼').fill('合成语音验收');
   await page.getByRole('checkbox').check();

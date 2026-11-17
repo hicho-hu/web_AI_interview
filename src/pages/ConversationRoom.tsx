@@ -1,3 +1,4 @@
+import { closingMessage } from '../features/interviews/closing';
 import InterviewScene from '../features/media/InterviewScene';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useBlocker, useNavigate } from 'react-router-dom';
@@ -23,6 +24,7 @@ import { api } from '../services/api';
 import { completeOperation, operationKey } from '../services/client';
 import { queryClient } from '../app/query';
 import { useSession } from '../stores/session';
+import { userStorageKey } from '../utils/userStorageKey';
 import { ConversationCapture, type CaptureResult } from '../features/media/ConversationCapture';
 import { joinUtterances, Pcm16Encoder, wavBlob, type Utterance } from '../features/media/voiceActivity';
 import {
@@ -50,6 +52,7 @@ type Phase =
   | 'processing'
   | 'paused'
   | 'saving'
+  | 'closing'
   | 'stopped';
 interface PendingAnswer {
   id: string;
@@ -59,6 +62,7 @@ interface PendingAnswer {
   parts: Utterance[];
   revision: number;
   committed: boolean;
+  endSession?: boolean;
   assetId?: string;
   liveTranscript?: Promise<LiveTranscript | null>;
 }
@@ -71,6 +75,7 @@ const labels: Record<Phase, string> = {
   processing: '正在分析回答 · 整场录制持续进行',
   paused: '对话已暂停 · 整场录制持续进行',
   saving: '正在保存整场面试',
+  closing: '面试官正在致结束语',
   stopped: '本次录制已结束',
 };
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -78,7 +83,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 export default function ConversationRoom({ initial }: { initial: Interview }) {
   const id = initial.id,
     mode = initial.mode === 'VIDEO' ? 'VIDEO' : 'VOICE';
-  const userId = useSession((s) => s.user!.id);
+  const userId = useSession((s) => userStorageKey(s.user));
   const navigate = useNavigate();
   const { modal } = App.useApp();
   const [phase, setPhase] = useState<Phase>('idle');
@@ -110,6 +115,8 @@ export default function ConversationRoom({ initial }: { initial: Interview }) {
   const pending = useRef<PendingAnswer | null>(null);
   const submission = useRef<Promise<void>>(Promise.resolve());
   const closing = useRef(false);
+  const endingRequested = useRef(false);
+  const closingSpeech = useRef('');
   const savedResult = useRef<CaptureResult | null>(null);
   const allowLeave = useRef(false);
   const spoken = useRef('');
@@ -235,7 +242,9 @@ export default function ConversationRoom({ initial }: { initial: Interview }) {
       const transcript = answer.liveTranscript
         ? await Promise.race([answer.liveTranscript, sleep(350).then(() => null)])
         : null;
+      answer.endSession ??= endingRequested.current;
       const body = {
+        ...(answer.endSession ? { end_session: true } : {}),
         asset_id: answer.assetId,
         client_duration_ms: Math.round(answer.duration),
         ...(transcript ? { live_transcript_id: transcript.transcriptId } : {}),
@@ -249,6 +258,10 @@ export default function ConversationRoom({ initial }: { initial: Interview }) {
           const current = capture.current;
           if (!current) return;
           if (event.type === 'transcript' && event.text) current.finalizeCandidate(answer.turnId, event.text);
+          if (event.type === 'closing') {
+            current.listening = false;
+            setPhase('closing');
+          }
           if (!current.active || closing.current) return;
           if (event.type === 'question' && event.turn_id && event.text) {
             const next: Turn = {
@@ -458,6 +471,7 @@ export default function ConversationRoom({ initial }: { initial: Interview }) {
     setError(null);
     setPhase('preparing');
     closing.current = false;
+    endingRequested.current = false;
     allowLeave.current = false;
     spoken.current = '';
     suppressedAudio.current.clear();
@@ -509,6 +523,17 @@ export default function ConversationRoom({ initial }: { initial: Interview }) {
       },
       onQuestionStarted: (durationMs) => {
         const question = itemRef.current.current_question;
+        if (closingSpeech.current) {
+          current.caption({
+            id: `closing:${id}`,
+            speaker: 'interviewer',
+            text: closingSpeech.current,
+            startMs: current.elapsedMs,
+            endMs: current.elapsedMs + durationMs,
+            final: true,
+          });
+          return;
+        }
         if (question)
           current.caption({
             id: `question:${question.id}`,
@@ -569,6 +594,7 @@ export default function ConversationRoom({ initial }: { initial: Interview }) {
       setPhase('idle');
       return true;
     }
+    endingRequested.current = end;
     current.flushSpeech();
     live.current?.channel?.dispose();
     live.current = null;
@@ -578,10 +604,13 @@ export default function ConversationRoom({ initial }: { initial: Interview }) {
     setPhase('saving');
     setError(null);
     try {
-      const result = savedResult.current || (await current.stop(interrupted));
-      savedResult.current = result;
-      setArchive(result);
-      setActive(false);
+      let result = savedResult.current;
+      if (!end && !result) {
+        result = await current.stop(interrupted);
+        savedResult.current = result;
+        setArchive(result);
+        setActive(false);
+      }
       if (pending.current && !sending.current) submission.current = sendAnswer(pending.current);
       await submission.current;
       let latest = await api.detail(id);
@@ -591,6 +620,39 @@ export default function ConversationRoom({ initial }: { initial: Interview }) {
       }
       if (processingTurn(latest.current_question?.status) || latest.current_question?.status === 'FAILED')
         throw new Error('最后一段回答尚未处理完成。整场记录已保留，请重试处理后再生成报告。');
+      if (end) {
+        if (['IN_PROGRESS', 'PAUSED'].includes(latest.status)) {
+          const scope = `conversation-finish:${id}:${reason}`;
+          await api.action(id, 'finish', operationKey(scope), { reason });
+          completeOperation(scope);
+          latest = await api.detail(id);
+        }
+        if (!result && ['FINISHING', 'COMPLETED', 'REPORT_FAILED'].includes(latest.status)) {
+          closingSpeech.current = latest.closing_message || closingMessage(latest.config.language);
+          setPhase('closing');
+          current.caption({
+            id: `closing:${id}`,
+            speaker: 'interviewer',
+            text: closingSpeech.current,
+            startMs: current.elapsedMs,
+            endMs: current.elapsedMs + 20000,
+            final: true,
+          });
+          try {
+            if (latest.closing_audio?.download_url)
+              await current.playQuestion(latest.closing_audio.download_url, true);
+            else await sleep(4500);
+          } catch {
+            await sleep(2500);
+          }
+          closingSpeech.current = '';
+        }
+      }
+      result ||= await current.stop(interrupted);
+      savedResult.current = result;
+      setArchive(result);
+      setActive(false);
+      setPhase('saving');
       const finalTurns = await api.turns(id);
       for (const completed of finalTurns.items)
         if (completed.transcript) current.finalizeCandidate(completed.id, completed.transcript);
@@ -611,11 +673,6 @@ export default function ConversationRoom({ initial }: { initial: Interview }) {
       if (!result.persisted && !uploaded)
         throw new Error('本地备份与后端保存均未成功，请先下载录制文件，保持本页面打开。');
       if (end) {
-        if (['IN_PROGRESS', 'PAUSED'].includes(latest.status)) {
-          const scope = `conversation-finish:${id}:${reason}`;
-          await api.action(id, 'finish', operationKey(scope), { reason });
-          completeOperation(scope);
-        }
         setPhase('stopped');
         closing.current = false;
         allowLeave.current = true;
@@ -630,6 +687,15 @@ export default function ConversationRoom({ initial }: { initial: Interview }) {
       }
       return true;
     } catch (e) {
+      if (current.active) {
+        const backup = await current.stop(true).catch(() => null);
+        if (backup) {
+          savedResult.current = backup;
+          setArchive(backup);
+        }
+      }
+      closingSpeech.current = '';
+      endingRequested.current = false;
       setError(e);
       setPhase('stopped');
       setActive(false);
@@ -706,7 +772,7 @@ export default function ConversationRoom({ initial }: { initial: Interview }) {
           <div className="conversation-stage-heading">
             <span className="inline">
               <AudioLines size={17} />
-              AI 面试官
+              AI面试官
             </span>
             {active && (
               <span className="continuous-recording">

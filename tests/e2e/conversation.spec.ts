@@ -161,7 +161,9 @@ for (const mode of ['VOICE', 'VIDEO'] as const) {
             window.WebSocket = FakeSocket as unknown as typeof WebSocket;
           });
         const user: User = {
-          id: 'continuous-test',
+          uid: '10000000',
+          id: '10000000',
+          storage_owner_key: 'continuous-test',
           nickname: '连续对话验证',
           status: 'ACTIVE',
           remaining_interviews: 3,
@@ -403,6 +405,7 @@ for (const mode of ['VOICE', 'VIDEO'] as const) {
           });
         });
         await page.goto('/login');
+        await page.getByRole('tab', { name: '体验账号', exact: true }).click();
         await page.getByLabel('测试账号标识').fill('continuous-fixture');
         await page.getByRole('checkbox').check();
         await page.getByRole('button', { name: '进入我的练习空间' }).click();

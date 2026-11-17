@@ -35,6 +35,7 @@ function put(ticket: UploadTicket, file: Blob, onProgress: (value: number) => vo
 }
 export async function uploadFile(file: Blob, input: UploadInput, onProgress: (value: number) => void) {
   let ticket = await api.uploadTicket(input);
+  if (ticket.reused) { onProgress(100); return ticket; }
   const transfer = () =>
     ticket.method === 'OSS_STS' ? uploadOSS(ticket, file, onProgress) : put(ticket, file, onProgress);
   let etag: string | void;
@@ -43,6 +44,7 @@ export async function uploadFile(file: Blob, input: UploadInput, onProgress: (va
   } catch (error) {
     if (error instanceof ApiError && [401, 403, 410].includes(error.status || 0)) {
       if (ticket.method !== 'OSS_STS') ticket = await api.uploadTicket(input);
+      if (ticket.reused) { onProgress(100); return ticket; }
       etag = await transfer();
     } else throw error;
   }

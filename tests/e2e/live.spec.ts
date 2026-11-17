@@ -15,6 +15,7 @@ test('真实后端请求：登录、用户信息、历史记录均通过 Vite �
     }
   });
   await page.goto('/login');
+  await page.getByRole('tab', { name: '体验账号', exact: true }).click();
   await page.getByLabel('测试账号标识').fill(`web-connection-check-${Date.now()}`);
   await page.getByLabel('你的称呼').fill('后端连接验证');
   await page.getByRole('checkbox').check();
@@ -37,6 +38,7 @@ test('FastAPI：独立测试账号、授权、创建、文字回答、服务端�
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto('/login');
+  await page.getByRole('tab', { name: '体验账号', exact: true }).click();
   await page.getByLabel('测试账号标识').fill(`web-e2e-${Date.now()}`);
   await page.getByLabel('你的称呼').fill('接口验证用户');
   await page.getByRole('checkbox').check();
@@ -47,7 +49,6 @@ test('FastAPI：独立测试账号、授权、创建、文字回答、服务端�
   await page
     .getByLabel('岗位描述 JD')
     .fill('负责 React 和 TypeScript 业务组件设计；分析页面加载性能；通过自动化测试保障交互质量。');
-  await page.getByLabel('主问题数量').fill('1');
   await page.getByLabel('允许 AI 动态追问').uncheck();
   await page.getByRole('checkbox', { name: /我同意使用以上岗位/ }).check();
   await page.getByRole('button', { name: '创建专属面试' }).click();
@@ -60,6 +61,9 @@ test('FastAPI：独立测试账号、授权、创建、文字回答、服务端�
       '在我的项目中，我使用 React 和 TypeScript 设计业务组件。我先梳理边界与状态，拆分组件，定义类型，再用自动化交互测试验证关键路径，通过构建和回归检查确保交付质量。',
     );
   await page.getByRole('button', { name: '提交回答', exact: true }).click();
+  await expect(page.getByRole('textbox', { name: '你的面试回答' })).toBeEnabled();
+  await page.getByRole('button', { name: '结束并生成报告', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: '结束并生成报告', exact: true }).click();
   await expect(page).toHaveURL(/\/report$/, { timeout: 90000 });
   await expect(page.getByRole('heading', { name: '本次面试综合表现' })).toBeVisible({ timeout: 90000 });
   await page.reload();

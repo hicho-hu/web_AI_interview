@@ -1,3 +1,4 @@
+import { closingMessage } from '../features/interviews/closing';
 import { lazy, Suspense, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { Link, useParams } from 'react-router-dom';
@@ -83,6 +84,12 @@ export default function ReportPage() {
           <ArrowLeft size={15} />
           返回面试记录
         </Link>
+        {item && ['FINISHING', 'COMPLETED', 'REPORT_FAILED'].includes(item.status) && (
+          <div className="panel interview-closing" role="status">
+            <strong>面试官结束语</strong>
+            <p>{item.closing_message || closingMessage(item.config.language)}</p>
+          </div>
+        )}
         <div className="panel report-pending">
           <span className="ready-icon">
             <FileCheck2 size={31} />
@@ -123,6 +130,12 @@ export default function ReportPage() {
     );
   return (
     <div className="report-page">
+      {item && (
+        <div className="panel interview-closing" role="status">
+          <strong>面试官结束语</strong>
+          <p>{item.closing_message || closingMessage(item.config.language)}</p>
+        </div>
+      )}
       <SessionReplay interviewId={id} />
       <Link className="back-link" to="/history">
         <ArrowLeft size={15} />

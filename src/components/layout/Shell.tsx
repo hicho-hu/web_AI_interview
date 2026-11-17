@@ -41,7 +41,7 @@ export function Brand() {
         </span>
       </span>
       <span>
-        面试序章<small>INTERVIEW STUDIO</small>
+        AI面试官<small>智能模拟面试</small>
       </span>
     </Link>
   );
@@ -222,7 +222,7 @@ export default function Shell() {
           <Outlet />
         </main>
         <footer className="footer">
-          <span>© {new Date().getFullYear()} 面试序章 · 让每一次面试，都更有准备</span>
+          <span>© {new Date().getFullYear()} AI面试官 · 让每一次面试，都更有准备</span>
           <span>
             <ShieldCheck size={13} />
             你的经历，始终属于你

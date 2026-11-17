@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Download, Headphones, LoaderCircle, MonitorPlay, Upload } from 'lucide-react';
 import { api } from '../../services/api';
 import { useSession } from '../../stores/session';
+import { userStorageKey } from '../../utils/userStorageKey';
 import { recordingStore, type SessionRecording } from '../../features/media/recordingStore';
 import { loadCapture, uploadSession } from '../../features/media/sessionUpload';
 import { signedUrl } from '../../features/media/upload';
@@ -18,7 +19,7 @@ export default function SessionReplay({
   interviewId: string;
   capture?: CaptureResult | null;
 }) {
-  const userId = useSession((s) => s.user?.id || '');
+  const userId = useSession((s) => userStorageKey(s.user));
   const [local, setLocal] = useState<SessionRecording[]>([]);
   const [audio, setAudio] = useState('');
   const [video, setVideo] = useState('');

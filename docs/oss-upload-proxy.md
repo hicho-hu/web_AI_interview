@@ -31,3 +31,30 @@ OSS_UPLOAD_TARGET=https://ai-interview-storage.oss-cn-hangzhou.aliyuncs.com
 需要恢复浏览器直连时，设置 `VITE_OSS_UPLOAD_MODE=direct` 并重新构建。此模式仍要求 OSS 配置精确的 Web Origin、PUT/POST/GET/HEAD/DELETE、AllowedHeader `*` 及 ExposeHeader `ETag,x-oss-request-id`，参考 [跨域规则模板](oss-cors.xml)。
 
 头像、简历、岗位图片、回答和整场录音录像共享这一上传链路。文件下载暂沿用后端签发的 OSS 下载 URL；本次代理覆盖上传，不改变回放地址。
+
+## 生产上传返回 502
+
+若浏览器请求已发往 Web 自身的 `/ai-interview/user/.../incoming/...`，但响应为 Nginx 的 HTML 502 页面，先定位生产 Nginx 的上游连接错误。HTTP 状态和响应头不能直接区分上游端口、DNS、网络或 TLS 证书问题；需要查看该服务器上对应时间的错误日志。
+
+在实际提供 HTTPS 页面的生产服务器执行：
+
+```sh
+sudo nginx -t
+sudo tail -n 80 /var/log/nginx/error.log
+curl -I --connect-timeout 5 --max-time 10 \
+  'https://ai-interview-storage.oss-cn-hangzhou.aliyuncs.com/ai-interview/user/connectivity-check/incoming/00000000-0000-4000-8000-000000000000.pdf'
+```
+
+curl 不携带凭证，私有 Bucket 返回 OSS 的 403 XML 和 `x-oss-request-id` 即可证明该服务器能连通 OSS；此检查不上传文件。若该请求正常而 Web 代理仍为 502，应按 Nginx 错误日志核对实际生效的 `location` 和上游参数。
+
+| 日志内容 | 核对方向 |
+| --- | --- |
+| `connect() failed ... Connection refused` / `no live upstreams` | 查看日志中的 `upstream`；若指向本机 Web 开发端口，检查对应服务是否运行，以及 HTTPS server 中 OSS 路径是否已配置为固定 OSS 上游。 |
+| `no resolver defined` / `could not be resolved` | 检查生产服务器 DNS，以及使用变量上游时的 Nginx `resolver` 配置。 |
+| `upstream SSL certificate verify error` | 检查系统 CA 证书包、`proxy_ssl_trusted_certificate`、证书验证名称和证书链；保持证书校验开启。 |
+| `SSL_do_handshake() failed` | 核对 HTTPS 上游、`proxy_ssl_server_name on` 和上游域名，使用日志中的具体 TLS 错误进一步判断。 |
+| `upstream timed out` | 检查日志中的目标地址，以及生产服务器到 OSS 的网络、出站规则和超时。 |
+
+当前 Nginx 示例使用固定 Bucket 域名；`proxy_ssl_name` 默认取 `proxy_pass` 的主机名。若线上改用命名 upstream 或 IP，需要显式将证书验证名称和 SNI 指向真实 Bucket 域名。只分享相关错误行，不复制包含 STS Token 或 Authorization 的完整调试请求。
+
+参考：[Nginx HTTPS 上游与 SNI](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_ssl_name)、[Nginx DNS resolver](https://nginx.org/en/docs/http/ngx_http_core_module.html#resolver)。

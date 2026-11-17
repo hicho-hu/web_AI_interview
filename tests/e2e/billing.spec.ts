@@ -14,6 +14,8 @@ type Scenario =
   | 'balance-error';
 async function fixture(page: Page, scenario: Scenario) {
   const user: User = {
+    uid: '10000000',
+    storage_owner_key: '10000000',
     id: 'billing-fixture',
     nickname: '权益购买验证',
     status: 'ACTIVE',
@@ -152,6 +154,7 @@ test('本地演示：选择套餐、模拟成功、权益到账、购买记录�
   page.on('pageerror', (error) => errors.push(error.message));
   await page.goto('/login');
   await page.getByRole('checkbox').check();
+  await page.getByRole('tab', { name: '体验账号', exact: true }).click();
   await page.getByRole('button', { name: '体验文字面试演示' }).click();
   await page.getByRole('link', { name: '我的权益', exact: true }).click();
   await expect(page.locator('.billing-balance-amount strong')).toHaveText('99');
@@ -265,7 +268,6 @@ test('分类组合变化但总次数和金额相同时，也必须重新确认�
   await expect(page.getByRole('region', { name: '文字面试权益' })).toContainText('6');
   await expect(page.getByRole('region', { name: '语音面试权益' })).toContainText('2');
 });
-
 
 test('购买能力由开关控制，不受旧开发环境标记限制', async ({ page }) => {
   const state = await fixture(page, 'capability');

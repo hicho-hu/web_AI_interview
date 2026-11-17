@@ -43,8 +43,10 @@ describe('文字面试演示闭环', () => {
     expect(() => mock.submit(id, turn.id, '再次提交')).toThrow('已经提交');
     const next = mock.detail(id).current_question!;
     mock.submit(id, next.id, '我拆分了复用组件，补充文档，并通过项目构建和团队复核验证。');
+    expect(mock.detail(id).status).toBe('IN_PROGRESS');
+    expect(mock.turns(id).items).toHaveLength(3);
+    mock.action(id, 'finish');
     expect(mock.detail(id).status).toBe('COMPLETED');
-    expect(mock.turns(id).items).toHaveLength(2);
     const report = mock.report(id).report!;
     expect(report.overall_score).toBeNull();
     expect(report.reviews[0].evidence[0]).toBe('我负责过组件开发。');

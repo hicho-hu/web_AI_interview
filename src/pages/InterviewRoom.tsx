@@ -237,7 +237,7 @@ function TextInterviewRoom() {
             </div>
             <span className="interviewer-online">
               <i />
-              AI 面试官
+              AI面试官
             </span>
           </div>
           <div className="interviewer-intro">
@@ -260,7 +260,7 @@ function TextInterviewRoom() {
             <span />
             <span />
             <span />
-            <small>INTERVIEW STUDIO</small>
+            <small>AI面试官</small>
           </div>
         </section>
         <section className="answer-column">
@@ -315,7 +315,7 @@ function TextInterviewRoom() {
               </span>
               <h2>你的专属面试已准备就绪</h2>
               <p>
-                {item.config.question_count} 道主问题 · {item.config.duration_minutes} 分钟
+                {item.config.duration_minutes} 分钟 · 题数随剩余时间调整
                 <br />
                 点击开始后计时并扣除 1 次练习额度
               </p>
@@ -468,20 +468,17 @@ function TextInterviewRoom() {
           <section className="panel progress-panel">
             <h3>
               本次练习进度
-              <span>
-                {Math.min((turn?.main_index || 0) + 1, item.config.question_count)} /{' '}
-                {item.config.question_count}
-              </span>
+              <span>已完成 {turns.data?.items.filter((t) => t.status === 'COMPLETED').length || 0} 轮</span>
             </h3>
             <div className="progress-track">
               <i
                 style={{
-                  width: `${Math.min(100, ((turn?.main_index || 0) / item.config.question_count) * 100)}%`,
+                  width: `${Math.min(100, (1 - seconds / (item.config.duration_minutes * 60)) * 100)}%`,
                 }}
               />
             </div>
             <ol>
-              {Array.from({ length: item.config.question_count }, (_, i) => (
+              {Array.from({ length: (turn?.main_index || 0) + 1 }, (_, i) => (
                 <li
                   key={i}
                   className={

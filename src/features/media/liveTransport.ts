@@ -12,6 +12,7 @@ export interface AnswerEvent {
     | 'thinking'
     | 'transcript'
     | 'question'
+    | 'closing'
     | 'audio_reset'
     | 'audio'
     | 'audio_end'

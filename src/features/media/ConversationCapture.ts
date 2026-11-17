@@ -36,6 +36,7 @@ export class ConversationCapture {
   private recorders: { kind: 'audio' | 'video'; recorder: MediaRecorder; chunks: Blob[] }[] = [];
   private worklet: AudioWorkletNode | null = null;
   private source: AudioBufferSourceNode | null = null;
+  private questionDone: (() => void) | null = null;
   private questionRequest: AbortController | null = null;
   private questionGeneration = 0;
   private vad: VoiceActivity | null = null;
@@ -327,7 +328,7 @@ export class ConversationCapture {
     this.session.startedAt = new Date(this.started).toISOString();
     for (const entry of this.recorders) entry.recorder.start(1000);
   }
-  async playQuestion(url: string) {
+  async playQuestion(url: string, waitForEnd = false) {
     if (this.vad?.active || this.closed) return;
     this.interrupt();
     const generation = this.questionGeneration;
@@ -344,7 +345,12 @@ export class ConversationCapture {
     source.connect(this.mixed!);
     if (this.questionAnalyser) source.connect(this.questionAnalyser);
     this.source = source;
+    const finished = new Promise<void>((resolve) => {
+      this.questionDone = resolve;
+    });
     source.onended = () => {
+      this.questionDone?.();
+      this.questionDone = null;
       if (generation === this.questionGeneration && this.source === source) {
         this.source = null;
         this.callbacks.onQuestionEnded();
@@ -352,8 +358,11 @@ export class ConversationCapture {
     };
     source.start();
     this.callbacks.onQuestionStarted?.(audio.duration * 1000);
+    if (waitForEnd) await finished;
   }
   interrupt() {
+    this.questionDone?.();
+    this.questionDone = null;
     if (this.subtitle?.speaker === 'interviewer' && this.subtitle.endMs > this.elapsedMs)
       this.caption({ ...this.subtitle, endMs: this.elapsedMs });
     this.questionGeneration++;

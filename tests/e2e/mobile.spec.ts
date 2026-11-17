@@ -5,6 +5,7 @@ import type { Interview, User } from '../../src/types/domain';
 async function demoLogin(page: Page) {
   await page.goto('/login');
   await page.getByRole('checkbox').check();
+  await page.getByRole('tab', { name: '体验账号', exact: true }).click();
   await page.getByRole('button', { name: '体验文字面试演示' }).click();
   await expect(page.getByRole('heading', { name: /准备好更进一步/ })).toBeVisible();
 }
@@ -76,9 +77,8 @@ test.describe('H5 手机浏览器', () => {
     await page.getByPlaceholder('搜索岗位名称或工作职能').fill('前端工程师');
     await page.getByRole('button', { name: '使用自定义岗位' }).click();
     await page.getByLabel('岗位描述 JD').fill('负责 React 组件架构设计，优化性能；协作落地复杂项目。');
-    await page.getByLabel('主问题数量').fill('1');
     await page.getByLabel('允许 AI 动态追问').uncheck();
-    await expect(page.locator('.mobile-plan-summary')).toContainText('1 道题');
+    await expect(page.locator('.mobile-plan-summary')).toContainText('题数随时间调整');
     await page.getByRole('checkbox', { name: /我同意使用以上岗位/ }).check();
     await page.screenshot({ path: 'test-results/h5-create.png', fullPage: true });
     await page.getByRole('button', { name: '创建专属面试', exact: true }).click();
@@ -97,6 +97,9 @@ test.describe('H5 手机浏览器', () => {
       );
     await page.screenshot({ path: 'test-results/h5-room.png', fullPage: true });
     await page.getByRole('button', { name: '提交回答', exact: true }).click();
+    await expect(page.getByRole('textbox', { name: '你的面试回答' })).toBeEnabled();
+    await page.getByRole('button', { name: '结束并生成报告', exact: true }).click();
+    await page.getByRole('dialog').getByRole('button', { name: '结束并生成报告', exact: true }).click();
     await expect(page).toHaveURL(/\/report$/);
     await expect(page.getByRole('heading', { name: /每一次复盘/ })).toBeVisible();
     await page.getByRole('button', { name: /01.*React/ }).click();
@@ -167,6 +170,7 @@ test.describe('H5 手机浏览器', () => {
   for (const mode of ['VOICE', 'VIDEO'] as const) {
     test(`${mode} 手机面试室保留授权、字幕、场景和操作`, async ({ page }) => {
       const user: User = {
+        uid: '10000000',
         id: 'h5-media',
         nickname: '手机验证',
         status: 'ACTIVE',
@@ -237,6 +241,7 @@ test.describe('H5 手机浏览器', () => {
   test('邀请页面在窄屏展示长邮箱、邀请奖励及完整链接', async ({ page }) => {
     const now = new Date().toISOString();
     const user: User = {
+      uid: '10000000',
       id: 'h5-invite',
       nickname: '手机邀请',
       status: 'ACTIVE',

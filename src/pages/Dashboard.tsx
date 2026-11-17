@@ -127,7 +127,7 @@ export default function Dashboard() {
               <Sparkles size={15} />
             </span>
             <div>
-              <b>AI 面试官</b>
+              <b>AI面试官</b>
               <span>聊聊你最有成就感的项目？</span>
             </div>
             <i />

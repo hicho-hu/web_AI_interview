@@ -25,12 +25,15 @@ import type {
 } from '../types/domain';
 import { request } from './client';
 import { mock } from './mock';
+import { userStorageKey } from '../utils/userStorageKey';
 import { recordingStore } from '../features/media/recordingStore';
 import { erasePurchaseAttempts } from '../features/billing/purchase';
 
 const demo = () => useSession.getState().mode === 'demo';
 const userSchema = z.object({
   id: z.string(),
+  uid: z.string().regex(/^[1-9][0-9]{7,18}$/),
+  storage_owner_key: z.string().optional(),
   nickname: z.string(),
   status: z.string(),
   remaining_interviews: z.number(),
@@ -205,7 +208,7 @@ export const api = {
   report: async (id: string) =>
     demo() ? mock.report(id) : request<ReportResult>('GET', `/interviews/${id}/report`),
   deleteInterview: async (id: string) => {
-    const userId = useSession.getState().user?.id;
+    const userId = userStorageKey(useSession.getState().user);
     const result = demo() ? mock.delete(id) : await request('DELETE', `/interviews/${id}`);
     if (userId) await recordingStore.erase(userId, id);
     return result;
@@ -253,7 +256,7 @@ export const api = {
       ? { user: mock.user(), jobs: mock.jobs(), interviews: mock.history(), consents: mock.consents() }
       : request<unknown>('GET', '/users/me/data'),
   eraseData: async () => {
-    const userId = useSession.getState().user?.id;
+    const userId = userStorageKey(useSession.getState().user);
     const result = demo() ? mock.erase() : await request('DELETE', '/users/me/data');
     if (userId) {
       erasePurchaseAttempts(userId);

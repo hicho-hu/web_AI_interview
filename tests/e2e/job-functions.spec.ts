@@ -5,6 +5,7 @@ test.use({ viewport: { width: 1440, height: 1000 } });
 test.beforeEach(async ({ page }) => {
   await page.goto('/login');
   await page.getByRole('checkbox').check();
+  await page.getByRole('tab', { name: '体验账号', exact: true }).click();
   await page.getByRole('button', { name: '体验文字面试演示' }).click();
   await expect(page).toHaveURL(/\/dashboard$/);
   await page.goto('/interviews/new');

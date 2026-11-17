@@ -13,6 +13,8 @@ export type InterviewStatus =
   | 'CANCELLED';
 export interface User {
   id: string;
+  uid: string;
+  storage_owner_key?: string;
   nickname: string;
   status: string;
   remaining_interviews: number;
@@ -128,6 +130,8 @@ export interface Turn {
   decision?: { decision?: string; reason?: string } | null;
 }
 export interface Interview {
+  closing_message?: string | null;
+  closing_audio?: MediaAsset | null;
   conversation_features?: { streaming_answers: boolean; live_transcription?: boolean };
   id: string;
   job_profile_id: string;
@@ -196,8 +200,16 @@ export interface Resume {
   id: string;
   asset_id: string;
   parse_status: string;
+  filename?: string;
+  size_bytes?: number;
+  content_type?: string;
+  available?: boolean;
+  download_url?: string | null;
+  expires_at?: string;
+  error_code?: string | null;
+  error_message?: string | null;
   task_id: string | null;
-  summary?: { summary: string };
+  summary?: { summary: string; work_experience?: string[] };
   created_at: string;
 }
 export type ConsentKind = 'PRIVACY' | 'TERMS' | 'AI_PROCESSING' | 'MICROPHONE' | 'CAMERA' | 'SCREEN_CAPTURE';
@@ -223,6 +235,7 @@ export interface UploadInput {
   duration_ms?: number;
 }
 export interface UploadTicket {
+  reused?: boolean;
   asset_id: string;
   resume_id?: string;
   upload_url: string;

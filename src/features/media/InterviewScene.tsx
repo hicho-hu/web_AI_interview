@@ -172,7 +172,7 @@ export function drawInterviewScene(
   }
   ctx.fillStyle = '#f2f6ff';
   ctx.font = '600 22px sans-serif';
-  ctx.fillText('AI 面试官', 36, 45);
+  ctx.fillText('AI面试官', 36, 45);
   ctx.fillText('我 · 摄像头', 670, 45);
   ctx.font = '16px sans-serif';
   ctx.fillStyle = '#a9bad5';
@@ -182,7 +182,7 @@ export function drawInterviewScene(
       ? `${Math.floor(seconds / 60)
           .toString()
           .padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}`
-      : '面试序章',
+      : 'AI面试官',
     1150,
     45,
   );
@@ -243,7 +243,7 @@ export default function InterviewScene({ canvas }: { canvas: HTMLCanvasElement |
       className="interview-scene"
       ref={ref}
       role="img"
-      aria-label="完整分屏画面：左侧 AI 面试官数字人，右侧我的摄像头"
+      aria-label="完整分屏画面：左侧 AI面试官数字人，右侧我的摄像头"
     />
   );
 }

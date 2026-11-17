@@ -1,3 +1,4 @@
+import ResumeLibrary from '../features/resumes/ResumeLibrary';
 import { useRef, useState } from 'react';
 import { App } from 'antd';
 import { useQuery } from '@tanstack/react-query';
@@ -12,12 +13,10 @@ import {
   LockKeyhole,
   MessageSquare,
   Mic,
-  Paperclip,
   Search,
   BriefcaseBusiness,
   ShieldCheck,
   Sparkles,
-  Upload,
   Video,
   X,
 } from 'lucide-react';
@@ -27,7 +26,6 @@ import { completeOperation, operationKey } from '../services/client';
 import { useSession } from '../stores/session';
 import { queryClient } from '../app/query';
 import { defaultConfig, configSchema, jobSchema } from '../features/interviews/schema';
-import { uploadFile } from '../features/media/upload';
 import { ErrorState, PageHeading } from '../components/common/ui';
 import { difficulties, modeLabels } from '../utils/interview';
 import { availableCredits, creditLabels } from '../features/billing/credits';
@@ -40,14 +38,11 @@ import {
   type JobFunction,
 } from '../features/jobs/functionCatalog';
 
-const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 export default function NewInterview() {
   const [job, setJob] = useState<JobInput>({ job_title: '', jd_text: '', seniority: 'MIDDLE' });
   const [config, setConfig] = useState<Config>({ ...defaultConfig });
   const [resumeId, setResumeId] = useState('');
-  const [fileName, setFileName] = useState('');
   const [uploading, setUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
   const [busy, setBusy] = useState(false);
   const [phase, setPhase] = useState('');
   const [error, setError] = useState<unknown>(null);
@@ -70,8 +65,14 @@ export default function NewInterview() {
   const savedJobOptions = (jobs.data?.items ?? []).filter((item) =>
     `${item.job_title} ${item.jd_text}`.toLocaleLowerCase().includes(query),
   );
-  const categoryGroups = jobFunctionGroups.filter((item) => jobCategory === 'ALL' || item.code === jobCategory);
-  const middleOptions = [...new Map(categoryGroups.flatMap((item) => item.children).map((item) => [item.code, item.name])).entries()];
+  const categoryGroups = jobFunctionGroups.filter(
+    (item) => jobCategory === 'ALL' || item.code === jobCategory,
+  );
+  const middleOptions = [
+    ...new Map(
+      categoryGroups.flatMap((item) => item.children).map((item) => [item.code, item.name]),
+    ).entries(),
+  ];
   const leafOptions = filterJobFunctions({
     categoryCode: jobCategory === 'ALL' ? undefined : jobCategory,
     subcategoryCode: jobMiddle || undefined,
@@ -80,7 +81,11 @@ export default function NewInterview() {
   function chooseJob(item: Job) {
     setJob({ job_title: item.job_title, jd_text: item.jd_text, seniority: item.seniority });
     cachedJob.current = {
-      payload: JSON.stringify({ job_title: item.job_title, jd_text: item.jd_text, seniority: item.seniority }),
+      payload: JSON.stringify({
+        job_title: item.job_title,
+        jd_text: item.jd_text,
+        seniority: item.seniority,
+      }),
       id: item.id,
     };
     setJobPickerOpen(false);
@@ -91,14 +96,18 @@ export default function NewInterview() {
       return;
     }
     setSelectedFunctions((current) => {
-      if (current.some((selected) => selected.code === item.code)) return current.filter((selected) => selected.code !== item.code);
+      if (current.some((selected) => selected.code === item.code))
+        return current.filter((selected) => selected.code !== item.code);
       return current.length < 3 ? [...current, item] : current;
     });
   }
   function confirmFunctions() {
     const items = selectedFunctions;
     if (!items.length) return;
-    const saved = items.length === 1 ? jobs.data?.items.find((profile) => profile.job_title === items[0].name) : undefined;
+    const saved =
+      items.length === 1
+        ? jobs.data?.items.find((profile) => profile.job_title === items[0].name)
+        : undefined;
     const next: JobInput = {
       ...job,
       job_title: items.map((item) => item.name).join('、'),
@@ -113,45 +122,6 @@ export default function NewInterview() {
     if (key === 'mode' && creationIssue === 'quota') {
       setCreationIssue(null);
       setError(null);
-    }
-  }
-  async function upload(file: File) {
-    if (!/\.(pdf|docx)$/i.test(file.name) || file.size > 10 * 1024 * 1024) {
-      void message.error('请上传不超过 10 MB 的 PDF 或 DOCX 简历');
-      return;
-    }
-    setUploading(true);
-    setError(null);
-    setResumeId('');
-    try {
-      await api.ensureConsents(['PRIVACY', 'TERMS', 'AI_PROCESSING']);
-      const ticket = await uploadFile(
-        file,
-        {
-          filename: file.name,
-          size: file.size,
-          content_type: file.name.toLowerCase().endsWith('.pdf')
-            ? 'application/pdf'
-            : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-          media_type: 'RESUME',
-        },
-        setUploadProgress,
-      );
-      for (let i = 0; i < 80; i++) {
-        const resume = await api.resume(ticket.resume_id!);
-        if (resume.parse_status === 'READY') {
-          setResumeId(resume.id);
-          setFileName(file.name);
-          return;
-        }
-        if (resume.parse_status === 'FAILED') throw new Error('简历解析失败，请重试或不使用简历继续');
-        await wait(1500);
-      }
-      throw new Error('简历解析超时，可移除简历继续');
-    } catch (e) {
-      setError(e);
-    } finally {
-      setUploading(false);
     }
   }
   async function create() {
@@ -240,7 +210,9 @@ export default function NewInterview() {
               <FileText size={20} />
             </div>
             <div className="field">
-              <label htmlFor="job-title">岗位名称<span className="required">*</span></label>
+              <label htmlFor="job-title">
+                岗位名称<span className="required">*</span>
+              </label>
               <input
                 id="job-title"
                 required
@@ -302,44 +274,8 @@ export default function NewInterview() {
                 <LockKeyhole size={19} />
                 <span>简历上传在真实后端模式下使用，演示模式不收集简历文件</span>
               </div>
-            ) : fileName ? (
-              <div className="uploaded-file">
-                <Paperclip size={20} />
-                <div>
-                  <strong>{fileName}</strong>
-                  <small>解析完成，已准备好关联面试</small>
-                </div>
-                <button
-                  type="button"
-                  className="icon-btn"
-                  aria-label="移除简历"
-                  onClick={() => {
-                    setResumeId('');
-                    setFileName('');
-                  }}
-                >
-                  <X size={18} />
-                </button>
-              </div>
             ) : (
-              <label className="upload-area">
-                <Upload size={23} />
-                <strong>{uploading ? `正在上传并解析 ${uploadProgress}%` : '点击上传你的简历'}</strong>
-                <span>
-                  PDF 或 DOCX · 最大 10 MB · 仅用于本次面试训练
-                </span>
-                <input
-                  aria-label="上传个人简历"
-                  type="file"
-                  accept=".pdf,.docx"
-                  disabled={uploading}
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file) void upload(file);
-                    e.target.value = '';
-                  }}
-                />
-              </label>
+              <ResumeLibrary selectedId={resumeId} onSelect={setResumeId} onBusy={setUploading} />
             )}
           </section>
           <section className="panel form-panel">
@@ -403,17 +339,10 @@ export default function NewInterview() {
                   ))}
                 </select>
               </label>
-              <label className="field">
-                主问题数量
-                <input
-                  type="number"
-                  min={1}
-                  max={20}
-                  required
-                  value={config.question_count}
-                  onChange={(e) => changeConfig('question_count', Number(e.target.value))}
-                />
-              </label>
+              <div className="field">
+                <span>提问节奏</span>
+                <p className="muted">根据剩余时间自动调整题数，优先围绕最近两家公司的经历展开。</p>
+              </div>
               <label className="field">
                 面试语言
                 <select
@@ -464,13 +393,15 @@ export default function NewInterview() {
           </section>
           <div className="mobile-plan-summary">
             <strong>
-              {modeLabels[config.mode]} · {config.duration_minutes} 分钟 · {config.question_count} 道题
+              {modeLabels[config.mode]} · {config.duration_minutes} 分钟 · 题数随时间调整
             </strong>
             <span>
-              本次预占 1 次{creditLabels[config.mode]}面试 · 可用 {user ? availableCredits(user, config.mode) : '—'} 次
+              本次预占 1 次{creditLabels[config.mode]}面试 · 可用{' '}
+              {user ? availableCredits(user, config.mode) : '—'} 次
             </span>
             <Link className="text-link" to="/billing">
-              查看或购买权益<ArrowRight size={14} />
+              查看或购买权益
+              <ArrowRight size={14} />
             </Link>
           </div>
           <label className="agreement create-agreement">
@@ -548,8 +479,8 @@ export default function NewInterview() {
                 <dd>{config.duration_minutes} 分钟</dd>
               </div>
               <div>
-                <dt>主问题数量</dt>
-                <dd>{config.question_count} 道</dd>
+                <dt>提问数量</dt>
+                <dd>随剩余时间调整</dd>
               </div>
               <div>
                 <dt>面试难度</dt>
@@ -583,42 +514,184 @@ export default function NewInterview() {
         </aside>
       </div>
       {jobPickerOpen && (
-        <div className="job-picker-backdrop" role="presentation" onMouseDown={(e) => {
-          if (e.target === e.currentTarget) setJobPickerOpen(false);
-        }}>
-          <section ref={jobPickerRef} className="job-picker-modal" role="dialog" aria-modal="true" aria-labelledby="job-picker-title">
+        <div
+          className="job-picker-backdrop"
+          role="presentation"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setJobPickerOpen(false);
+          }}
+        >
+          <section
+            ref={jobPickerRef}
+            className="job-picker-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="job-picker-title"
+          >
             <header>
-              <div><span>选择你的方向</span><h2 id="job-picker-title">选择目标岗位</h2></div>
-              <button className="icon-btn" type="button" aria-label="关闭" onClick={() => setJobPickerOpen(false)}><X size={19} /></button>
+              <div>
+                <span>选择你的方向</span>
+                <h2 id="job-picker-title">选择目标岗位</h2>
+              </div>
+              <button
+                className="icon-btn"
+                type="button"
+                aria-label="关闭"
+                onClick={() => setJobPickerOpen(false)}
+              >
+                <X size={19} />
+              </button>
             </header>
-            <label className="job-picker-search"><Search size={17} /><input data-dialog-focus aria-label="搜索岗位或工作职能" value={jobSearch} onChange={(e) => setJobSearch(e.target.value)} placeholder="搜索岗位名称或工作职能" /></label>
+            <label className="job-picker-search">
+              <Search size={17} />
+              <input
+                data-dialog-focus
+                aria-label="搜索岗位或工作职能"
+                value={jobSearch}
+                onChange={(e) => setJobSearch(e.target.value)}
+                placeholder="搜索岗位名称或工作职能"
+              />
+            </label>
             <div className="job-picker-tree">
-              <nav aria-label="一级职能分类"><button type="button" aria-pressed={jobCategory === 'ALL'} className={jobCategory === 'ALL' ? 'selected' : ''} onClick={() => { setJobCategory('ALL'); setJobMiddle(''); }}>全部职能</button>{jobFunctionGroups.map(({ code, name }) => <button type="button" key={code} aria-pressed={jobCategory === code} className={jobCategory === code ? 'selected' : ''} onClick={() => { setJobCategory(code); setJobMiddle(''); }}>{name}</button>)}</nav>
-              <nav aria-label="二级职能分类"><button type="button" aria-pressed={!jobMiddle} className={!jobMiddle ? 'selected' : ''} onClick={() => setJobMiddle('')}>全部细分职能</button>{middleOptions.map(([code, name]) => <button type="button" key={code} aria-pressed={jobMiddle === code} className={jobMiddle === code ? 'selected' : ''} onClick={() => setJobMiddle(code)}>{name}</button>)}</nav>
-            <div className="job-picker-results">
-              {selectedFunctions.length > 0 && <div className="job-picker-selected" aria-label="已选岗位">已选 {selectedFunctions.length}/3：{selectedFunctions.map((item) => <button type="button" key={item.code} aria-label={`移除 ${item.name}`} onClick={() => toggleFunction(item)}>{item.name} ×</button>)}</div>}
-              {savedJobOptions.map((item) => (
-                <button type="button" className="job-picker-option" key={`saved-${item.id}`} onClick={() => chooseJob(item)}>
-                  <span className="job-picker-icon"><BriefcaseBusiness size={18} /></span>
-                  <span><strong>{item.job_title}</strong><small>{item.jd_text.slice(0, 110) || '选择后可补充岗位 JD'}</small></span>
-                  <span className="job-picker-seniority">我的岗位</span>
+              <nav aria-label="一级职能分类">
+                <button
+                  type="button"
+                  aria-pressed={jobCategory === 'ALL'}
+                  className={jobCategory === 'ALL' ? 'selected' : ''}
+                  onClick={() => {
+                    setJobCategory('ALL');
+                    setJobMiddle('');
+                  }}
+                >
+                  全部职能
                 </button>
-              ))}
-              {leafOptions.map((item) => (
-                <button type="button" aria-label={`选择 ${item.name}`} aria-pressed={selectedFunctions.some((selected) => selected.code === item.code)} className={`job-picker-option ${selectedFunctions.some((selected) => selected.code === item.code) ? 'selected' : ''}`} key={`function-${item.code}`} onClick={() => toggleFunction(item)}>
-                  <span className="job-picker-icon"><BriefcaseBusiness size={18} /></span>
-                  <span><strong>{item.name}</strong><small>{item.categoryName} / {item.subcategoryName}</small></span>
-                  <span className="job-picker-seniority">{selectedFunctions.some((selected) => selected.code === item.code) ? '已选择' : '选择岗位'}</span>
+                {jobFunctionGroups.map(({ code, name }) => (
+                  <button
+                    type="button"
+                    key={code}
+                    aria-pressed={jobCategory === code}
+                    className={jobCategory === code ? 'selected' : ''}
+                    onClick={() => {
+                      setJobCategory(code);
+                      setJobMiddle('');
+                    }}
+                  >
+                    {name}
+                  </button>
+                ))}
+              </nav>
+              <nav aria-label="二级职能分类">
+                <button
+                  type="button"
+                  aria-pressed={!jobMiddle}
+                  className={!jobMiddle ? 'selected' : ''}
+                  onClick={() => setJobMiddle('')}
+                >
+                  全部细分职能
                 </button>
-              ))}
-              {!savedJobOptions.length && !leafOptions.length && <div className="job-picker-empty">没有匹配的岗位，可以切换职能分类或使用自定义岗位。</div>}
+                {middleOptions.map(([code, name]) => (
+                  <button
+                    type="button"
+                    key={code}
+                    aria-pressed={jobMiddle === code}
+                    className={jobMiddle === code ? 'selected' : ''}
+                    onClick={() => setJobMiddle(code)}
+                  >
+                    {name}
+                  </button>
+                ))}
+              </nav>
+              <div className="job-picker-results">
+                {selectedFunctions.length > 0 && (
+                  <div className="job-picker-selected" aria-label="已选岗位">
+                    已选 {selectedFunctions.length}/3：
+                    {selectedFunctions.map((item) => (
+                      <button
+                        type="button"
+                        key={item.code}
+                        aria-label={`移除 ${item.name}`}
+                        onClick={() => toggleFunction(item)}
+                      >
+                        {item.name} ×
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {savedJobOptions.map((item) => (
+                  <button
+                    type="button"
+                    className="job-picker-option"
+                    key={`saved-${item.id}`}
+                    onClick={() => chooseJob(item)}
+                  >
+                    <span className="job-picker-icon">
+                      <BriefcaseBusiness size={18} />
+                    </span>
+                    <span>
+                      <strong>{item.job_title}</strong>
+                      <small>{item.jd_text.slice(0, 110) || '选择后可补充岗位 JD'}</small>
+                    </span>
+                    <span className="job-picker-seniority">我的岗位</span>
+                  </button>
+                ))}
+                {leafOptions.map((item) => (
+                  <button
+                    type="button"
+                    aria-label={`选择 ${item.name}`}
+                    aria-pressed={selectedFunctions.some((selected) => selected.code === item.code)}
+                    className={`job-picker-option ${selectedFunctions.some((selected) => selected.code === item.code) ? 'selected' : ''}`}
+                    key={`function-${item.code}`}
+                    onClick={() => toggleFunction(item)}
+                  >
+                    <span className="job-picker-icon">
+                      <BriefcaseBusiness size={18} />
+                    </span>
+                    <span>
+                      <strong>{item.name}</strong>
+                      <small>
+                        {item.categoryName} / {item.subcategoryName}
+                      </small>
+                    </span>
+                    <span className="job-picker-seniority">
+                      {selectedFunctions.some((selected) => selected.code === item.code)
+                        ? '已选择'
+                        : '选择岗位'}
+                    </span>
+                  </button>
+                ))}
+                {!savedJobOptions.length && !leafOptions.length && (
+                  <div className="job-picker-empty">没有匹配的岗位，可以切换职能分类或使用自定义岗位。</div>
+                )}
               </div>
             </div>
-            <footer><span>岗位分类参考 <a href={jobFunctionSource.url} target="_blank" rel="noreferrer">前程无忧「工作职能」</a> · 最多选择 3 个岗位</span><button type="button" className="btn primary" onClick={confirmFunctions} disabled={!selectedFunctions.length}>确认选择</button><button type="button" className="btn secondary" onClick={() => {
-              setJob((current) => ({ ...current, job_title: current.job_title || jobSearch.trim() }));
-              cachedJob.current = null;
-              setJobPickerOpen(false);
-            }}>使用自定义岗位</button></footer>
+            <footer>
+              <span>
+                岗位分类参考{' '}
+                <a href={jobFunctionSource.url} target="_blank" rel="noreferrer">
+                  前程无忧「工作职能」
+                </a>{' '}
+                · 最多选择 3 个岗位
+              </span>
+              <button
+                type="button"
+                className="btn primary"
+                onClick={confirmFunctions}
+                disabled={!selectedFunctions.length}
+              >
+                确认选择
+              </button>
+              <button
+                type="button"
+                className="btn secondary"
+                onClick={() => {
+                  setJob((current) => ({ ...current, job_title: current.job_title || jobSearch.trim() }));
+                  cachedJob.current = null;
+                  setJobPickerOpen(false);
+                }}
+              >
+                使用自定义岗位
+              </button>
+            </footer>
           </section>
         </div>
       )}

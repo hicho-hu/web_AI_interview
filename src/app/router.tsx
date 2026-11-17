@@ -86,7 +86,7 @@ export default function Application() {
             <a className="skip-link" href="#main-content">
               跳到主要内容
             </a>
-            <Suspense fallback={<Loading label="正在打开面试序章…" />}>
+            <Suspense fallback={<Loading label="正在打开AI面试官…" />}>
               <RouterProvider router={router} />
             </Suspense>
           </App>

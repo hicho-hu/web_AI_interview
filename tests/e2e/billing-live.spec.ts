@@ -8,6 +8,7 @@ test('FastAPI 权益购买：真实订单、模拟成功回调、权益持久化
   request,
 }) => {
   await page.goto('/login');
+  await page.getByRole('tab', { name: '体验账号', exact: true }).click();
   await page.getByLabel('测试账号标识').fill(`billing-e2e-${Date.now()}`);
   await page.getByLabel('你的称呼').fill('权益购买验收');
   await page.getByRole('checkbox').check();

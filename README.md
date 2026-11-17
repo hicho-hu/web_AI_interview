@@ -1,4 +1,4 @@
-# 面试序章 · AI 模拟面试 Web
+# AI面试官 · Web
 
 根据两份 V1.0 PDF 实现的求职者客户端，后端复用 `http://localhost:8000` FastAPI。架构与 API 对应关系见 [开发方案](docs/frontend-plan.md)。
 

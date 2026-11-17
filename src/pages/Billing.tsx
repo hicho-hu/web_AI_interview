@@ -18,6 +18,7 @@ import {
 import { api } from '../services/api';
 import { queryClient } from '../app/query';
 import { useSession } from '../stores/session';
+import { userStorageKey } from '../utils/userStorageKey';
 import { completePurchase, money, purchaseAttempt, rememberPurchase } from '../features/billing/purchase';
 import { ErrorState, Loading, PageHeading } from '../components/common/ui';
 import { dateText } from '../utils/interview';
@@ -43,7 +44,7 @@ const rewardModeNames: Record<string, string> = {
 
 export default function Billing() {
   const { user } = useSession();
-  const userId = user!.id;
+  const userId = userStorageKey(user);
   const [page, setPage] = useState(1);
   const [checkout, setCheckout] = useState<Checkout | null>(null);
   const [phase, setPhase] = useState<PaymentPhase>('review');
@@ -71,7 +72,7 @@ export default function Billing() {
     setSyncError(null);
     await queryClient.cancelQueries({ queryKey: ['me'] });
     const [me, entitlement] = await Promise.allSettled([api.me(), api.entitlements()]);
-    if (useSession.getState().user?.id !== userId) return;
+    if (userStorageKey(useSession.getState().user) !== userId) return;
     if (me.status === 'fulfilled') {
       useSession.getState().setUser(me.value);
       queryClient.setQueryData(['me'], me.value);
@@ -131,7 +132,7 @@ export default function Billing() {
         completePurchase(userId, order);
         throw new Error('此订单已关闭或退款，请关闭窗口后重新选择套餐。');
       }
-      if (useSession.getState().user?.id !== userId) return;
+      if (userStorageKey(useSession.getState().user) !== userId) return;
       setPhase('paying');
       // This authenticated endpoint simulates a successful callback when enabled.
       // The server changes the order and grants the credits in one transaction.

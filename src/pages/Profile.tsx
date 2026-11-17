@@ -1,3 +1,4 @@
+import ResumeLibrary from '../features/resumes/ResumeLibrary';
 import AccountSettings from '../features/accounts/AccountSettings';
 import { creditsText } from '../features/billing/credits';
 import { useState } from 'react';
@@ -21,7 +22,7 @@ import { api } from '../services/api';
 import { queryClient } from '../app/query';
 import { useSession } from '../stores/session';
 import type { ConsentKind } from '../types/domain';
-import { Empty, ErrorState, Loading, PageHeading } from '../components/common/ui';
+import { ErrorState, Loading, PageHeading } from '../components/common/ui';
 import { SystemAvatar } from '../components/common/SystemAvatar';
 import { dateText } from '../utils/interview';
 
@@ -42,7 +43,6 @@ export default function Profile() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const consents = useQuery({ queryKey: ['consents'], queryFn: api.consents });
-  const resumes = useQuery({ queryKey: ['resumes'], queryFn: api.resumes });
   const save = useMutation({
     mutationFn: () => api.updateMe(nickname.trim()),
     onSuccess: (value) => {
@@ -147,6 +147,9 @@ export default function Profile() {
         title="个人中心"
         description="管理你的账号、授权与数据，安心开始每一次练习。"
       />
+      <p className="muted mono" aria-label="用户 UID">
+        UID {user?.uid || '—'}
+      </p>
       <div className="profile-layout">
         <div className="profile-main">
           <details className="panel profile-disclosure profile-card">
@@ -264,57 +267,13 @@ export default function Profile() {
               </span>
               <span className="profile-disclosure-title">
                 <strong>我的简历</strong>
-                <small>{resumes.data?.items.length ?? 0} 份 · 管理已上传简历</small>
+                <small>上传、查看和删除简历 · 面试时直接选择</small>
               </span>
               <span className="profile-disclosure-action">查看</span>
               <ChevronDown className="profile-disclosure-chevron" size={18} />
             </summary>
             <div className="profile-disclosure-content">
-              {resumes.isPending ? (
-                <Loading />
-              ) : resumes.isError ? (
-                <ErrorState error={resumes.error} retry={() => void resumes.refetch()} />
-              ) : !resumes.data?.items.length ? (
-                <Empty
-                  title="还没有上传简历"
-                  description="简历是可选的，你也可以只用岗位 JD 开始练习。"
-                  action={false}
-                />
-              ) : (
-                resumes.data.items.map((r) => (
-                  <div className="resume-row" key={r.id}>
-                    <FileText size={22} />
-                    <div>
-                      <strong>简历 · {dateText(r.created_at)}</strong>
-                      <p>{r.summary?.summary?.slice(0, 90) || r.parse_status}</p>
-                    </div>
-                    <button
-                      className="icon-btn"
-                      title="删除简历"
-                      aria-label="删除简历"
-                      onClick={() =>
-                        modal.confirm({
-                          title: '删除这份简历？',
-                          content: '删除简历后将无法继续在新面试中使用。',
-                          okText: '确认删除',
-                          cancelText: '取消',
-                          onOk: async () => {
-                            try {
-                              await api.deleteResume(r.id);
-                              await resumes.refetch();
-                            } catch (e) {
-                              setError(e);
-                              throw e;
-                            }
-                          },
-                        })
-                      }
-                    >
-                      <Trash2 size={17} />
-                    </button>
-                  </div>
-                ))
-              )}
+              <ResumeLibrary />
             </div>
           </details>
           <details className="panel profile-disclosure data-panel">

@@ -1,3 +1,4 @@
+import { closingMessage } from '../features/interviews/closing';
 import type {
   Config,
   ConsentKind,
@@ -101,7 +102,9 @@ function createReport(_item: Interview, turns: Turn[]): Report {
 function fresh(): DemoData {
   return {
     user: {
-      id: 'demo-user',
+      id: '10000000',
+      storage_owner_key: 'demo-user',
+      uid: '10000000',
       nickname: '体验用户',
       status: 'ACTIVE',
       remaining_interviews: 99,
@@ -124,6 +127,9 @@ function read(): DemoData {
   try {
     const data = JSON.parse(localStorage.getItem(storageKey) || 'null') as DemoData | null;
     if (!data) return fresh();
+    data.user.uid ??= '10000000';
+    data.user.storage_owner_key ??= data.user.id;
+    data.user.id = data.user.uid;
     data.user.universal_interviews ??= data.user.remaining_interviews;
     data.user.interview_credits ??= emptyCredits();
     return {
@@ -321,6 +327,7 @@ export const mock = {
     stopClock(db, item);
     if (action === 'finish' || action === 'report/regenerate') {
       item.status = 'COMPLETED';
+      item.closing_message = closingMessage(item.config.language);
       item.ended_at = now();
       const previous = db.reports[itemId]?.version || 0;
       db.reports[itemId] = createReport(item, db.turns[itemId]);
@@ -358,7 +365,8 @@ export const mock = {
       turn.turn_type === 'MAIN' &&
       text.length < 100;
     let next: Turn | null = null;
-    if (followup)
+    const canAsk = item.config.duration_minutes * 60 - elapsed(db, item) >= 45;
+    if (followup && canAsk)
       next = {
         ...makeTurn(item, turn.main_index, this.job(item.job_profile_id)),
         id: id(),
@@ -370,7 +378,7 @@ export const mock = {
             ? 'Could you add your specific actions and measurable results?'
             : '你提到的这段经历中，你个人采取了哪些具体行动？能否补充一个可验证的结果？',
       };
-    else if (turn.main_index + 1 < item.config.question_count)
+    else if (canAsk)
       next = {
         ...makeTurn(item, turn.main_index + 1, this.job(item.job_profile_id)),
         turn_no: turns.length + 1,
@@ -382,6 +390,7 @@ export const mock = {
     } else {
       stopClock(db, item);
       item.status = 'COMPLETED';
+      item.closing_message = closingMessage(item.config.language);
       item.ended_at = now();
       item.current_question = turn;
       db.reports[itemId] = createReport(item, turns);
