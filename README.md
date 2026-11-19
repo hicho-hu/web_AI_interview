@@ -109,7 +109,7 @@ REGISTRATION_MOCK_E2E=1 PRODUCTION_PREVIEW=1 API_PROXY_TARGET=http://127.0.0.1:8
 
 后端设为 `STORAGE_BACKEND=oss` 时，头像、简历、回答、整场音视频和字幕会使用 OSS。Web 按服务端返回的 `asset_id` 申请 STS 临时凭证，上传路径由后端固定；8 MB 以上文件采用分片上传并自动刷新凭证。长期 RAM 密钥只放后端 `.env`。
 
-角色需绑定 [OSS 权限策略](docs/oss-role-policy.json)，Bucket 保持私有。上传默认走 Web 同源代理，由 Nginx/Vite 转发到固定 Bucket，不依赖 OSS 的浏览器跨域规则；生产必须同时更新前端构建产物和 Nginx 配置。部署步骤及可选直连模式见 [OSS 上传代理](docs/oss-upload-proxy.md)。完整配置、后端内容校验、短期签名回放及旧本地文件兼容见后端 `docs/oss-storage.md`。管理后台“系统管理 → 文件存储”的连接检查不代替浏览器上传验收。
+角色需绑定 [OSS 权限策略](docs/oss-role-policy.json)，Bucket 保持私有。上传和 AI 提问/结束语音频默认走 Web 同源代理，由 Nginx/Vite 转发到固定 Bucket，不依赖 OSS 的浏览器跨域规则；生产必须同时更新前端构建产物和 Nginx 配置。音频代理仅允许读取 generated 下的 WAV/MP3，保留原签名授权；部署步骤及可选直连模式见 [OSS 上传与 AI 语音代理](docs/oss-upload-proxy.md)。完整配置、后端内容校验、短期签名回放及旧本地文件兼容见后端 `docs/oss-storage.md`。管理后台“系统管理 → 文件存储”的连接检查不代替浏览器上传验收。
 
 使用 `VITE_OSS_UPLOAD_MODE=direct` 直连上传时，若提示“OSS 上传未完成”，先检查 OSS Bucket 的跨域规则是否允许实际网页 Origin（协议、主机、端口）。当前示例已加入 `http://121.41.206.87:3000`，需在 OSS 控制台中实际保存；修改仓库 XML 或后端 API 的 CORS 配置不会同步修改 Bucket。具体配置与无文件上传的预检方法见 [OSS 上传排查](docs/oss-upload-troubleshooting.md)。
 

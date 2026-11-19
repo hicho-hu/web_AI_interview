@@ -2,7 +2,7 @@ import { createServer as createHTTPServer, type IncomingHttpHeaders } from 'node
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, expect, it } from 'vitest';
 import { createServer, type ViteDevServer } from 'vite';
-import { ossUploadProxy } from '../config/ossProxy';
+import { ossAudioProxy, ossUploadProxy } from '../config/ossProxy';
 
 const received: { url: string; method: string; headers: IncomingHttpHeaders; body: Buffer }[] = [];
 const upstream = createHTTPServer(async (request, response) => {
@@ -25,6 +25,7 @@ let vite: ViteDevServer;
 let origin: string;
 let upstreamHost: string;
 const key = '/ai-interview/user/test-owner/incoming/asset-a.pdf';
+const audioKey = '/ai-interview/user/test-owner/generated/question-a.wav';
 
 beforeAll(async () => {
   await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
@@ -32,7 +33,15 @@ beforeAll(async () => {
   vite = await createServer({
     configFile: false,
     logLevel: 'silent',
-    server: { host: '127.0.0.1', port: 0, cors: false, proxy: ossUploadProxy(`http://${upstreamHost}`) },
+    server: {
+      host: '127.0.0.1',
+      port: 0,
+      cors: false,
+      proxy: {
+        ...ossUploadProxy(`http://${upstreamHost}`),
+        ...ossAudioProxy(`http://${upstreamHost}`),
+      },
+    },
   });
   await vite.listen();
   origin = `http://127.0.0.1:${(vite.httpServer!.address() as AddressInfo).port}`;
@@ -95,6 +104,56 @@ it('passes multipart POST XML and OSS error statuses through the proxy', async (
 it('does not forward accepted objects or arbitrary paths to OSS', async () => {
   for (const path of [key.replace('/incoming/', '/accepted/'), '/ai-interview/other', '/other-bucket/file']) {
     const response = await fetch(origin + path, { method: 'PUT', body: 'test' });
+    await response.text();
+  }
+  expect(received).toEqual([]);
+});
+
+it('reads signed AI audio without CORS and preserves the raw signature query and range', async () => {
+  const query =
+    '?x-oss-security-token=token%2Bpart%2Fvalue%3D&x-oss-signature=abc123&x-oss-date=20261119T153434Z';
+  const response = await fetch(origin + audioKey + query, {
+    headers: {
+      Origin: origin,
+      Cookie: 'session=must-not-reach-oss',
+      Authorization: 'Bearer site-token',
+      Range: 'bytes=0-11',
+    },
+  });
+  expect(response.status).toBe(200);
+  expect(await response.text()).toBe('ok');
+  expect(response.headers.get('cache-control')).toBe('no-store');
+  expect(response.headers.get('access-control-allow-origin')).toBeNull();
+  expect(received).toHaveLength(1);
+  expect(received[0].url).toBe(audioKey + query);
+  expect(received[0].headers.host).toBe(upstreamHost);
+  expect(received[0].headers.range).toBe('bytes=0-11');
+  for (const header of ['origin', 'cookie', 'authorization'])
+    expect(received[0].headers[header]).toBeUndefined();
+});
+
+it('supports audio HEAD and preserves OSS signature failures', async () => {
+  const head = await fetch(origin + audioKey + '?x-oss-signature=synthetic', { method: 'HEAD' });
+  expect(head.status).toBe(200);
+  expect(await head.text()).toBe('');
+  expect(received[0].method).toBe('HEAD');
+  const expired = await fetch(origin + audioKey + '?uploadId=expired');
+  expect(expired.status).toBe(403);
+  expect(await expired.text()).toBe('<Error><Code>AccessDenied</Code></Error>');
+});
+
+it('rejects generated audio writes and paths outside the audio namespace before reaching OSS', async () => {
+  for (const method of ['PUT', 'POST', 'DELETE', 'PATCH']) {
+    const response = await fetch(origin + audioKey, { method });
+    expect(response.status).toBe(404);
+    await response.text();
+  }
+  for (const path of [
+    audioKey.replace('.wav', '.pdf'),
+    audioKey.replace('/generated/', '/accepted/'),
+    audioKey.replace('question-a.wav', 'nested/question-a.wav'),
+  ]) {
+    const response = await fetch(origin + path);
     await response.text();
   }
   expect(received).toEqual([]);

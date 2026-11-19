@@ -4,7 +4,6 @@ import { ApiError } from '../../services/client';
 import { uploadOSS } from '../../services/oss';
 
 export function signedUrl(url: string) {
-  // Only rewrite the backend's local object path; S3/COS URLs remain untouched.
   const parsed = new URL(url, window.location.origin);
   const base = new URL(import.meta.env.VITE_API_BASE_URL || '/api/v1', window.location.origin);
   if (
@@ -12,6 +11,19 @@ export function signedUrl(url: string) {
     ['localhost', '127.0.0.1'].includes(parsed.hostname)
   ) {
     return new URL(`${parsed.pathname}${parsed.search}`, base.origin).href;
+  }
+  // Web Audio fetches need CORS even when the signed OSS URL is valid. Keep the
+  // generated audio path and signed query intact through the fixed Web proxy.
+  const audioHost =
+    import.meta.env.VITE_OSS_AUDIO_HOST || 'ai-interview-storage.oss-cn-hangzhou.aliyuncs.com';
+  if (
+    import.meta.env.VITE_OSS_AUDIO_MODE !== 'direct' &&
+    parsed.origin === `https://${audioHost}` &&
+    !parsed.username &&
+    !parsed.password &&
+    /^\/ai-interview\/user\/[A-Za-z0-9-]+\/generated\/[A-Za-z0-9-]+\.(?:wav|mp3)$/.test(parsed.pathname)
+  ) {
+    return new URL(`${parsed.pathname}${parsed.search}`, window.location.origin).href;
   }
   return parsed.href;
 }
@@ -35,7 +47,10 @@ function put(ticket: UploadTicket, file: Blob, onProgress: (value: number) => vo
 }
 export async function uploadFile(file: Blob, input: UploadInput, onProgress: (value: number) => void) {
   let ticket = await api.uploadTicket(input);
-  if (ticket.reused) { onProgress(100); return ticket; }
+  if (ticket.reused) {
+    onProgress(100);
+    return ticket;
+  }
   const transfer = () =>
     ticket.method === 'OSS_STS' ? uploadOSS(ticket, file, onProgress) : put(ticket, file, onProgress);
   let etag: string | void;
@@ -44,7 +59,10 @@ export async function uploadFile(file: Blob, input: UploadInput, onProgress: (va
   } catch (error) {
     if (error instanceof ApiError && [401, 403, 410].includes(error.status || 0)) {
       if (ticket.method !== 'OSS_STS') ticket = await api.uploadTicket(input);
-      if (ticket.reused) { onProgress(100); return ticket; }
+      if (ticket.reused) {
+        onProgress(100);
+        return ticket;
+      }
       etag = await transfer();
     } else throw error;
   }

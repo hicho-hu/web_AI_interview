@@ -2,6 +2,7 @@
 <CORSConfiguration>
   <CORSRule>
     <AllowedOrigin>http://121.41.206.87:3000</AllowedOrigin>
+    <AllowedOrigin>https://121.41.206.87</AllowedOrigin>
     <AllowedOrigin>http://127.0.0.1:5173</AllowedOrigin>
     <AllowedOrigin>http://localhost:5173</AllowedOrigin>
     <AllowedOrigin>http://127.0.0.1:5174</AllowedOrigin>

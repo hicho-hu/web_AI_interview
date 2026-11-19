@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import type { Config, Interview, MediaAsset, Turn, UploadInput, User } from '../../src/types/domain';
+import type { Config, Interview, MediaAsset, Report, Turn, UploadInput, User } from '../../src/types/domain';
 
 function questionWav() {
   const frames = 16000 * 8,
@@ -180,12 +180,18 @@ for (const mode of ['VOICE', 'VIDEO'] as const) {
           max_clarifications: 1,
           interview_type: 'COMPREHENSIVE',
         };
+        const proxiedAudio = mode === 'VOICE' && ending === 'automatic' && transport === 'legacy';
+        const audioPath = '/ai-interview/user/10000000/generated/question-audio.wav';
+        const audioQuery = '?x-oss-security-token=synthetic%2Btoken%2Fvalue%3D&x-oss-signature=synthetic';
+        const audioRequests: string[] = [];
         const questionAudio: MediaAsset = {
           id: 'question-audio',
           media_type: 'AUDIO',
           status: 'READY',
           content_type: 'audio/wav',
-          download_url: '/fixtures/question.wav',
+          download_url: proxiedAudio
+            ? `https://ai-interview-storage.oss-cn-hangzhou.aliyuncs.com${audioPath}${audioQuery}`
+            : '/fixtures/question.wav',
           duration_ms: 8000,
         };
         const turn: Turn = {
@@ -236,6 +242,21 @@ for (const mode of ['VOICE', 'VIDEO'] as const) {
         await page.route('**/fixtures/question.wav', (route) =>
           route.fulfill({ contentType: 'audio/wav', body: questionWav() }),
         );
+        if (proxiedAudio) {
+          // A direct cross-origin request is unavailable, as in production without CORS.
+          await page.route('https://ai-interview-storage.oss-cn-hangzhou.aliyuncs.com/**', (route) =>
+            route.abort('accessdenied'),
+          );
+          await page.route(
+            (url) =>
+              url.pathname === audioPath &&
+              url.hostname !== 'ai-interview-storage.oss-cn-hangzhou.aliyuncs.com',
+            (route) => {
+              audioRequests.push(route.request().url());
+              return route.fulfill({ contentType: 'audio/wav', body: questionWav() });
+            },
+          );
+        }
         await page.route('**/api/v1/**', async (route) => {
           const request = route.request(),
             path = new URL(request.url()).pathname;
@@ -397,8 +418,45 @@ for (const mode of ['VOICE', 'VIDEO'] as const) {
               data = { events: sequence };
             }
           } else if (path.endsWith('/turns')) data = { items: completedTurns };
-          else if (path.endsWith('/report')) data = { status: item.status, report: null };
-          else if (path.endsWith('/interviews/continuous-fixture')) data = item;
+          else if (path.endsWith('/experience-feedback'))
+            data = {
+              feedback: {
+                id: 'fixture-feedback',
+                ratings: {
+                  question_quality: 5,
+                  followup_experience: 5,
+                  pacing: 5,
+                  interaction: 5,
+                  overall: 5,
+                },
+                comment: '',
+              },
+              dimensions: {},
+            };
+          else if (path.endsWith('/report')) {
+            const report: Report = {
+              id: 'fixture-report',
+              version: 1,
+              overall_score: null,
+              job_match_feedback: '合成数据用于验证整场录制回放。',
+              dimensions: [],
+              reviews: [],
+              strengths: [],
+              gaps: [],
+              recommendations: [],
+              practice_questions: [],
+              disclaimer: '仅用于自动化测试。',
+              is_mock: true,
+              model: 'fixture',
+              original_turns: completedTurns.map((turn) => ({
+                turn_id: turn.id,
+                question: turn.question,
+                answer: turn.transcript || '',
+              })),
+              created_at: user.created_at,
+            };
+            data = { status: item.status, report: item.status === 'COMPLETED' ? report : null };
+          } else if (path.endsWith('/interviews/continuous-fixture')) data = item;
           else if (path.endsWith('/interviews')) data = { items: [], total: 0, page: 1, page_size: 100 };
           await route.fulfill({
             json: { code: 'OK', message: 'success', data, request_id: 'continuous-fixture' },
@@ -426,6 +484,11 @@ for (const mode of ['VOICE', 'VIDEO'] as const) {
         await page.getByRole('checkbox', { name: /我同意全程录制/ }).check();
         await page.getByRole('button', { name: '开始面试并全程录制' }).click();
         await expect(page.getByRole('heading', { name: '面试官正在提问 · 开口即可打断' })).toBeVisible();
+        if (proxiedAudio) {
+          await expect.poll(() => audioRequests.length).toBeGreaterThan(0);
+          expect(audioRequests[0]).toBe(new URL(audioPath + audioQuery, page.url()).href);
+          await expect(page.getByRole('log', { name: '实时字幕' })).toContainText(turn.question);
+        }
         if (mode === 'VIDEO') {
           expect(
             await page.evaluate(() =>
@@ -493,6 +556,7 @@ for (const mode of ['VOICE', 'VIDEO'] as const) {
           await page.getByRole('button', { name: '继续生成报告', exact: true }).click();
         }
         await expect(page).toHaveURL(/\/report$/);
+        await page.getByRole('tab', { name: '面试回放', exact: true }).click();
         await expect(page.getByLabel('整场面试语音回放')).toBeVisible();
         await expect(page.getByRole('link', { name: '下载字幕', exact: true })).toBeVisible();
         const full = [...assets.values()].filter((a) => a.ready && a.input.media_type.startsWith('SESSION_'));
@@ -558,6 +622,7 @@ for (const mode of ['VOICE', 'VIDEO'] as const) {
             .toBe(true);
         }
         await page.reload();
+        await page.getByRole('tab', { name: '面试回放', exact: true }).click();
         await expect(page.getByLabel('整场面试语音回放')).toBeVisible();
         expect(errors).toEqual([]);
       });
