@@ -51,10 +51,37 @@ curl 不携带凭证，私有 Bucket 返回 OSS 的 403 XML 和 `x-oss-request-i
 | --- | --- |
 | `connect() failed ... Connection refused` / `no live upstreams` | 查看日志中的 `upstream`；若指向本机 Web 开发端口，检查对应服务是否运行，以及 HTTPS server 中 OSS 路径是否已配置为固定 OSS 上游。 |
 | `no resolver defined` / `could not be resolved` | 检查生产服务器 DNS，以及使用变量上游时的 Nginx `resolver` 配置。 |
-| `upstream SSL certificate verify error` | 检查系统 CA 证书包、`proxy_ssl_trusted_certificate`、证书验证名称和证书链；保持证书校验开启。 |
+| `upstream SSL certificate verify error: (22:certificate chain too long)` | OSS 证书链超过 Nginx 默认验证深度 `1`；在 OSS `location` 内设置 `proxy_ssl_verify_depth 5;`，保留 `proxy_ssl_verify on;` 和受信 CA 文件，再检查配置并重载。 |
+| 其他 `upstream SSL certificate verify error` | 检查系统 CA 证书包、`proxy_ssl_trusted_certificate`、证书验证名称和证书链；保持证书校验开启。 |
 | `SSL_do_handshake() failed` | 核对 HTTPS 上游、`proxy_ssl_server_name on` 和上游域名，使用日志中的具体 TLS 错误进一步判断。 |
 | `upstream timed out` | 检查日志中的目标地址，以及生产服务器到 OSS 的网络、出站规则和超时。 |
 
 当前 Nginx 示例使用固定 Bucket 域名；`proxy_ssl_name` 默认取 `proxy_pass` 的主机名。若线上改用命名 upstream 或 IP，需要显式将证书验证名称和 SNI 指向真实 Bucket 域名。只分享相关错误行，不复制包含 STS Token 或 Authorization 的完整调试请求。
 
-参考：[Nginx HTTPS 上游与 SNI](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_ssl_name)、[Nginx DNS resolver](https://nginx.org/en/docs/http/ngx_http_core_module.html#resolver)。
+### `certificate chain too long` 的生产修复
+
+2026-11-19 的生产日志显示，`/resumes/upload-url` 返回 201、`/storage/sts-token` 返回 200，但同源文件 PUT 返回 502，Web 容器报告 `upstream SSL certificate verify error: (22:certificate chain too long)`。失败发生在 Nginx 到 OSS 的 TLS 握手阶段，尚未进入 OSS 对象上传。
+
+仓库配置已显式设置验证深度。实际执行 OSS 代理的 Nginx `location` 应包含：
+
+```nginx
+proxy_ssl_server_name on;
+proxy_ssl_verify on;
+proxy_ssl_verify_depth 5;
+proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+```
+
+证书链允许包含更多中间 CA，仍需通过受信 CA、有效期和上游名称校验。默认深度 `1` 可能拒绝有效的公共证书链；修改验证深度无需更换网站 HTTPS 证书或重新签发 STS。
+
+Docker 部署更新 Web 源码后，使用现有生产 Compose 配置重新构建并重建 Web 服务。`Dockerfile` 会把修复后的 `nginx.conf` 复制到 `/etc/nginx/conf.d/default.conf`；仅重启旧容器或更新 `dist/` 不会应用此修改。
+
+如需先在运行中的 `ai-web` 容器修复，仅在其实际 OSS `location` 中添加或修改 `proxy_ssl_verify_depth 5;`，保留现有 `/api` 上游及其他部署配置。若配置文件来自宿主机挂载，应修改挂载源文件。然后执行：
+
+```sh
+docker exec ai-web nginx -t
+docker exec ai-web nginx -s reload
+```
+
+仅在配置检查成功后重载。容器内临时修改会在重建时丢失，仍须同步部署仓库修复。刷新浏览器重新上传，确认文件 PUT 和随后的 `/media/{asset_id}/complete` 均成功。
+
+参考：[Nginx 证书链验证深度](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_ssl_verify_depth)、[Nginx HTTPS 上游与 SNI](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_ssl_name)、[Nginx DNS resolver](https://nginx.org/en/docs/http/ngx_http_core_module.html#resolver)。
