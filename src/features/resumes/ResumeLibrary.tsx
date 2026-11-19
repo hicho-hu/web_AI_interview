@@ -7,6 +7,7 @@ import { queryClient } from '../../app/query';
 import { ErrorState, Loading } from '../../components/common/ui';
 import { signedUrl, uploadFile } from '../media/upload';
 import { useSession } from '../../stores/session';
+import OriginalResumePreview from './OriginalResumePreview';
 import type { Resume } from '../../types/domain';
 
 const pending = (resume: Resume) => ['PENDING', 'PROCESSING', 'PARSING'].includes(resume.parse_status);
@@ -27,6 +28,7 @@ export default function ResumeLibrary({
   const [progress, setProgress] = useState(0);
   const [phase, setPhase] = useState('');
   const [failedResume, setFailedResume] = useState<Resume | null>(null);
+  const [preview, setPreview] = useState<Resume | null>(null);
   const [error, setError] = useState<unknown>(null);
   const resumes = useQuery({
     queryKey: ['resumes', user?.id],
@@ -158,6 +160,9 @@ export default function ResumeLibrary({
   if (mode === 'demo') return <p className="muted">演示模式不收集简历文件，请连接真实后端后使用简历管理。</p>;
   return (
     <div className="resume-library">
+      {preview && (
+        <OriginalResumePreview key={preview.id} resume={preview} onClose={() => setPreview(null)} />
+      )}
       <div className="resume-library-toolbar">
         <p className="muted">
           {onSelect ? '单选一份简历，也可以不使用简历。' : '管理你的简历，开始面试时可直接选择。'}{' '}
@@ -266,31 +271,15 @@ export default function ResumeLibrary({
                 </span>
               </label>
               <div className="resume-library-actions">
-                {record.summary?.summary && (
-                  <button
-                    type="button"
-                    className="icon-btn"
-                    aria-label={`查看简历 ${record.filename || ''}`}
-                    title="查看简历内容"
-                    onClick={() =>
-                      modal.info({
-                        title: record.filename || '简历内容',
-                        width: 680,
-                        content: (
-                          <pre className="resume-preview">
-                            {record.summary!.summary}
-                            {record.summary?.work_experience?.length
-                              ? `\n\n工作经历\n${record.summary.work_experience.join('\n')}`
-                              : ''}
-                          </pre>
-                        ),
-                        okText: '关闭',
-                      })
-                    }
-                  >
-                    <Eye size={16} />
-                  </button>
-                )}
+                <button
+                  type="button"
+                  className="icon-btn"
+                  aria-label={`查看简历 ${record.filename || ''}`}
+                  title="预览完整原文件"
+                  onClick={() => setPreview(record)}
+                >
+                  <Eye size={16} />
+                </button>
                 {record.download_url && (
                   <button
                     type="button"

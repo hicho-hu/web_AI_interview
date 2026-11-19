@@ -11,7 +11,9 @@ import { uploadFile } from '../media/upload';
 import type { LoginResult, User } from '../../types/domain';
 
 const isValidEmail = (value: string) =>
-  /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,63}$/i.test(value.trim());
+  /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,63}$/i.test(
+    value.trim(),
+  );
 function isValidPhone(value: string) {
   const phone = value.trim();
   if (!phone) return true;
@@ -29,7 +31,16 @@ const systemAvatarOptions = [
     label,
     group: 'female',
   })),
-  ...['工程师', '教师', '医生', '设计师', '厨师', '科学家', '自然研究员', '商务职场'].map((label, index) => ({
+  ...[
+    '工程师',
+    '教师',
+    '医生',
+    '设计师',
+    '厨师',
+    '科学家',
+    '自然研究员',
+    '商务职场',
+  ].map((label, index) => ({
     key: `avatar-${String(index + 9).padStart(2, '0')}`,
     label,
     group: 'career',
@@ -37,11 +48,15 @@ const systemAvatarOptions = [
 ];
 
 async function avatarFile(file: File) {
-  if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 5 * 1024 * 1024)
+  if (
+    !['image/jpeg', 'image/png', 'image/webp'].includes(file.type) ||
+    file.size > 5 * 1024 * 1024
+  )
     throw new Error('请选择不超过 5 MB 的 PNG、JPEG 或 WebP 图片');
   const bitmap = await createImageBitmap(file);
   try {
-    if (Math.max(bitmap.width, bitmap.height) > 8192) throw new Error('头像图片尺寸过大');
+    if (Math.max(bitmap.width, bitmap.height) > 8192)
+      throw new Error('头像图片尺寸过大');
     const canvas = document.createElement('canvas');
     canvas.width = canvas.height = 256;
     const context = canvas.getContext('2d')!;
@@ -93,6 +108,7 @@ export default function AccountSettings() {
     setPhone(user?.contact_phone ?? '');
   }, [user?.email, user?.contact_phone]);
   function update(value: User) {
+    void queryClient.cancelQueries({ queryKey: ['me'] });
     setUser(value);
     queryClient.setQueryData(['me'], value);
   }
@@ -100,7 +116,11 @@ export default function AccountSettings() {
     login(value.access_token, value.user, 'live');
     update(value.user);
   }
-  async function perform(name: string, work: () => Promise<void>, errorGroup = name) {
+  async function perform(
+    name: string,
+    work: () => Promise<void>,
+    errorGroup = name,
+  ) {
     if (busy) return;
     setBusy(name);
     setErrors((current) => ({ ...current, [errorGroup]: null }));
@@ -116,7 +136,9 @@ export default function AccountSettings() {
     return (
       <section className="panel account-settings">
         <h2>账号安全</h2>
-        <p className="muted">演示账号不绑定邮箱、不设置密码；连接真实后端后可管理账号资料。</p>
+        <p className="muted">
+          演示账号不绑定邮箱、不设置密码；连接真实后端后可管理账号资料。
+        </p>
       </section>
     );
   return (
@@ -141,11 +163,16 @@ export default function AccountSettings() {
           <p className="muted">头像会裁为正方形，仅用于展示账号资料。</p>
           <div className="account-avatar-preview">
             {user?.system_avatar_key ? (
-              <SystemAvatar avatarKey={user.system_avatar_key} label="当前系统头像" />
+              <SystemAvatar
+                avatarKey={user.system_avatar_key}
+                label="当前系统头像"
+              />
             ) : user?.avatar_url ? (
               <img src={user.avatar_url} alt="当前头像" />
             ) : (
-              <span className="account-avatar-initial">{user?.nickname.slice(0, 1)}</span>
+              <span className="account-avatar-initial">
+                {user?.nickname.slice(0, 1)}
+              </span>
             )}
             <div>
               <strong>选择一张喜欢的头像</strong>
@@ -207,7 +234,10 @@ export default function AccountSettings() {
           onSubmit={(event) => {
             event.preventDefault();
             void perform('email', async () => {
-              if (!verification.challengeId || verification.destination !== email.trim().toLowerCase())
+              if (
+                !verification.challengeId ||
+                verification.destination !== email.trim().toLowerCase()
+              )
                 throw new Error('请先为当前邮箱获取验证码');
               authenticated(
                 await api.bindEmail({
@@ -227,7 +257,9 @@ export default function AccountSettings() {
           }}
         >
           <p className="muted">
-            {user?.email ? `当前邮箱：${user.email}` : '验证邮箱并设置密码后，即可使用邮箱登录。'}
+            {user?.email
+              ? `当前邮箱：${user.email}`
+              : '验证邮箱并设置密码后，即可使用邮箱登录。'}
           </p>
           <label className="field">
             {user?.email ? '新邮箱地址' : '绑定邮箱地址'}
@@ -255,25 +287,31 @@ export default function AccountSettings() {
               <button
                 type="button"
                 className="btn secondary small"
-                disabled={!!busy || verification.sending || verification.remaining > 0}
+                disabled={
+                  !!busy || verification.sending || verification.remaining > 0
+                }
                 onClick={() =>
                   void perform(
                     'code',
                     async () => {
-                      if (!isValidEmail(email)) throw new Error('请输入格式正确的邮箱地址');
+                      if (!isValidEmail(email))
+                        throw new Error('请输入格式正确的邮箱地址');
                       await verification.send(email, 'REGISTER', true);
                     },
                     'email',
                   )
                 }
               >
-                {verification.remaining ? `${verification.remaining} 秒后重发` : '发送验证码'}
+                {verification.remaining
+                  ? `${verification.remaining} 秒后重发`
+                  : '发送验证码'}
               </button>
             </div>
           </label>
           {verification.developmentCode && (
             <p className="email-preview-note">
-              本地邮件预览 · 验证码 <b>{verification.developmentCode}</b>，未发送真实邮件。
+              本地邮件预览 · 验证码 <b>{verification.developmentCode}</b>
+              ，未发送真实邮件。
             </p>
           )}
           {user?.has_password ? (
@@ -324,8 +362,11 @@ export default function AccountSettings() {
             onSubmit={(event) => {
               event.preventDefault();
               void perform('password', async () => {
-                if (newPassword !== confirmPassword) throw new Error('两次新密码不一致');
-                authenticated(await api.changePassword(currentPassword, newPassword));
+                if (newPassword !== confirmPassword)
+                  throw new Error('两次新密码不一致');
+                authenticated(
+                  await api.changePassword(currentPassword, newPassword),
+                );
                 setCurrentPassword('');
                 setNewPassword('');
                 setConfirmPassword('');
@@ -391,13 +432,16 @@ export default function AccountSettings() {
           onSubmit={(event) => {
             event.preventDefault();
             void perform('phone', async () => {
-              if (!isValidPhone(phone)) throw new Error('请输入 7 至 15 位有效手机号，可带国家区号');
+              if (!isValidPhone(phone))
+                throw new Error('请输入 7 至 15 位有效手机号，可带国家区号');
               update(await api.updateContact(phone));
               void message.success('联系手机号已保存');
             });
           }}
         >
-          <p className="muted">仅作为可选联系信息，尚未认证，不用于登录或验证身份。</p>
+          <p className="muted">
+            仅作为可选联系信息，尚未认证，不用于登录或验证身份。
+          </p>
           <label className="field">
             联系手机号
             <input
@@ -422,8 +466,14 @@ export default function AccountSettings() {
         width={560}
         destroyOnHidden
       >
-        <p className="system-avatar-intro">挑选一张喜欢的头像，应用到你的个人资料。</p>
-        <div className="system-avatar-filters" role="group" aria-label="头像分类">
+        <p className="system-avatar-intro">
+          挑选一张喜欢的头像，应用到你的个人资料。
+        </p>
+        <div
+          className="system-avatar-filters"
+          role="group"
+          aria-label="头像分类"
+        >
           {(
             [
               ['all', '全部'],
@@ -444,7 +494,9 @@ export default function AccountSettings() {
         </div>
         <div className="system-avatar-grid">
           {systemAvatarOptions
-            .filter((item) => avatarFilter === 'all' || item.group === avatarFilter)
+            .filter(
+              (item) => avatarFilter === 'all' || item.group === avatarFilter,
+            )
             .map((item) => (
               <button
                 type="button"

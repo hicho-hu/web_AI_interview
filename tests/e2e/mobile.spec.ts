@@ -101,8 +101,8 @@ test.describe('H5 手机浏览器', () => {
     await page.getByRole('button', { name: '结束并生成报告', exact: true }).click();
     await page.getByRole('dialog').getByRole('button', { name: '结束并生成报告', exact: true }).click();
     await expect(page).toHaveURL(/\/report$/);
-    await expect(page.getByRole('heading', { name: /每一次复盘/ })).toBeVisible();
-    await page.getByRole('button', { name: /01.*React/ }).click();
+    await expect(page.getByRole('heading', { name: '模拟面试复盘', exact: true })).toBeVisible();
+    await page.getByRole('tab', { name: '逐题复盘', exact: true }).click();
     await expect(page.getByText('你的回答原文')).toBeVisible();
     await noOverflow(page);
     await page.screenshot({ path: 'test-results/h5-report.png', fullPage: true });

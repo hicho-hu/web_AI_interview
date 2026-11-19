@@ -33,8 +33,8 @@ test('演示：创建 → 准备 → 回答 → 报告 → 历史复盘，支持
   await page.getByRole('button', { name: '结束并生成报告', exact: true }).click();
   await page.getByRole('dialog').getByRole('button', { name: '结束并生成报告', exact: true }).click();
   await expect(page).toHaveURL(/\/report$/);
-  await expect(page.getByRole('heading', { name: /每一次复盘/ })).toBeVisible();
-  await page.getByRole('button', { name: /01.*React/ }).click();
+  await expect(page.getByRole('heading', { name: '模拟面试复盘', exact: true })).toBeVisible();
+  await page.getByRole('tab', { name: '逐题复盘', exact: true }).click();
   await expect(page.getByText('你的回答原文')).toBeVisible();
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.screenshot({ path: 'test-results/report-desktop.png', fullPage: true });

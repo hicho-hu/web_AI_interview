@@ -11,3 +11,5 @@ createRoot(document.getElementById('root')!).render(
     <Application />
   </StrictMode>,
 );
+
+import './styles/select.css';

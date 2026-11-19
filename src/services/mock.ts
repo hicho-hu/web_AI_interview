@@ -199,6 +199,7 @@ export const mock = {
       product_code: product.code,
       amount_minor: product.amount_minor,
       credits: product.credits,
+      vip_days: product.vip_days || 0,
       interview_credits: product.interview_credits ? { ...product.interview_credits } : null,
       currency: product.currency,
       status: 'PENDING',
@@ -219,6 +220,10 @@ export const mock = {
     if (order.status === 'PENDING') {
       order.status = 'PAID';
       order.paid_at = now();
+      if (order.vip_days) {
+        const prior = db.user.membership?.expires_at ? new Date(db.user.membership.expires_at).getTime() : 0;
+        db.user.membership = { level: 'VIP', active: true, expires_at: new Date(Math.max(Date.now(), prior) + order.vip_days * 86400000).toISOString() };
+      }
       db.user.remaining_interviews += order.credits;
       if (order.interview_credits) {
         for (const mode of creditModes) db.user.interview_credits![mode] += order.interview_credits[mode];

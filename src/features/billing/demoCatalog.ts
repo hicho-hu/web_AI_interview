@@ -4,6 +4,8 @@ export const demoCatalog: ProductCatalog = {
   payment_enabled: false,
   development_mock_payment: true,
   items: [
+    { code: 'VIP_MONTHLY', kind: 'MONTH', name: 'VIP月卡', amount_minor: 5990, credits: 0,
+      interview_credits: { TEXT: 0, VOICE: 0, VIDEO: 0 }, vip_days: 30, currency: 'CNY' },
     {
       code: 'SINGLE',
       kind: 'SINGLE',

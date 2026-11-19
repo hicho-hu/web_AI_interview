@@ -1,5 +1,10 @@
 export type Mode = 'TEXT' | 'VOICE' | 'VIDEO';
 export type ModeCredits = Record<Mode, number>;
+export interface Membership {
+  level: 'FREE' | 'VIP';
+  active: boolean;
+  expires_at: string | null;
+}
 export type InterviewStatus =
   | 'DRAFT'
   | 'PREPARING'
@@ -12,6 +17,7 @@ export type InterviewStatus =
   | 'COMPLETED'
   | 'CANCELLED';
 export interface User {
+  membership?: Membership;
   id: string;
   uid: string;
   storage_owner_key?: string;
@@ -29,6 +35,7 @@ export interface User {
   phone_verified?: boolean;
 }
 export interface Product {
+  vip_days?: number;
   code: string;
   kind?: 'SINGLE' | 'MONTH' | 'QUARTER' | 'YEAR' | 'PACK';
   name: string;
@@ -45,6 +52,11 @@ export interface ProductCatalog {
   mock_payment_enabled?: boolean;
 }
 export interface Entitlements {
+  membership?: Membership;
+  unlimited?: boolean;
+  remaining_unlocks?: number;
+  unlocked_count?: number;
+  reward_unlocks?: number;
   remaining_interviews: number;
   reserved_interviews: number;
   universal_interviews?: number;
@@ -62,6 +74,7 @@ export interface UsageRecord {
   created_at: string;
 }
 export interface BillingOrder {
+  vip_days?: number;
   id: string;
   product_code: string;
   amount_minor: number;
@@ -225,11 +238,19 @@ export interface Consents {
   items: Consent[];
 }
 export interface UploadInput {
+  practice_session_id?: string;
   filename: string;
   content_type: string;
   size: number;
   media_type:
-    'AUDIO' | 'VIDEO' | 'RESUME' | 'AVATAR' | 'SESSION_AUDIO' | 'SESSION_VIDEO' | 'SESSION_CAPTIONS';
+    | 'AUDIO'
+    | 'VIDEO'
+    | 'RESUME'
+    | 'AVATAR'
+    | 'SESSION_AUDIO'
+    | 'SESSION_VIDEO'
+    | 'SESSION_CAPTIONS'
+    | 'PRACTICE_AUDIO';
   interview_id?: string;
   turn_id?: string;
   duration_ms?: number;

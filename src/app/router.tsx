@@ -18,6 +18,8 @@ const History = lazy(() => import('../pages/History'));
 const Profile = lazy(() => import('../pages/Profile'));
 const Billing = lazy(() => import('../pages/Billing'));
 const Invitations = lazy(() => import('../pages/Invitations'));
+const QuestionBank = lazy(() => import('../pages/QuestionBank'));
+const QuestionPractice = lazy(() => import('../pages/QuestionPractice'));
 function Protected() {
   const token = useSession((s) => s.token);
   return token ? <Outlet /> : <Navigate to="/login" replace />;
@@ -60,6 +62,11 @@ const router = createBrowserRouter([
           { path: '/profile', element: <Profile /> },
           { path: '/billing', element: <Billing /> },
           { path: '/invitations', element: <Invitations /> },
+          { path: '/question-bank', element: <QuestionBank /> },
+          {
+            path: '/question-bank/practice/:id',
+            element: <QuestionPractice />,
+          },
         ],
       },
     ],
@@ -74,6 +81,13 @@ export default function Application() {
         <ConfigProvider
           locale={zhCN}
           theme={{
+            components: {
+              Select: {
+                optionSelectedBg: '#edf2ff',
+                optionSelectedColor: '#3d65ec',
+                optionActiveBg: '#f4f6fb',
+              },
+            },
             token: {
               colorPrimary: '#3d65ec',
               borderRadius: 10,

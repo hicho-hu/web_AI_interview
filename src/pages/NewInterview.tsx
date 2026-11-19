@@ -1,3 +1,4 @@
+import AppSelect from '../components/common/AppSelect';
 import ResumeLibrary from '../features/resumes/ResumeLibrary';
 import { useRef, useState } from 'react';
 import { App } from 'antd';
@@ -31,6 +32,7 @@ import { difficulties, modeLabels } from '../utils/interview';
 import { availableCredits, creditLabels } from '../features/billing/credits';
 import { useDialogFocus } from '../components/common/useDialogFocus';
 import { readyJob } from '../features/jobs/prepare';
+import { generateJobDescription, mergeJobDescription } from '../features/jobs/description';
 import {
   filterJobFunctions,
   jobFunctionGroups,
@@ -39,7 +41,11 @@ import {
 } from '../features/jobs/functionCatalog';
 
 export default function NewInterview() {
-  const [job, setJob] = useState<JobInput>({ job_title: '', jd_text: '', seniority: 'MIDDLE' });
+  const [job, setJob] = useState<JobInput>({
+    job_title: '',
+    jd_text: '',
+    seniority: 'MIDDLE',
+  });
   const [config, setConfig] = useState<Config>({ ...defaultConfig });
   const [resumeId, setResumeId] = useState('');
   const [uploading, setUploading] = useState(false);
@@ -56,6 +62,7 @@ export default function NewInterview() {
   const [jobMiddle, setJobMiddle] = useState('');
   const [selectedFunctions, setSelectedFunctions] = useState<JobFunction[]>([]);
   const agreementInput = useRef<HTMLInputElement | null>(null);
+  const generatedJD = useRef('');
   const cachedJob = useRef<{ payload: string; id: string } | null>(null);
   const { mode, user, setUser } = useSession();
   const { message } = App.useApp();
@@ -79,7 +86,13 @@ export default function NewInterview() {
     search: query,
   });
   function chooseJob(item: Job) {
-    setJob({ job_title: item.job_title, jd_text: item.jd_text, seniority: item.seniority });
+    generatedJD.current = item.jd_text;
+    setSelectedFunctions([]);
+    setJob({
+      job_title: item.job_title,
+      jd_text: item.jd_text,
+      seniority: item.seniority,
+    });
     cachedJob.current = {
       payload: JSON.stringify({
         job_title: item.job_title,
@@ -104,15 +117,19 @@ export default function NewInterview() {
   function confirmFunctions() {
     const items = selectedFunctions;
     if (!items.length) return;
-    const saved =
-      items.length === 1
-        ? jobs.data?.items.find((profile) => profile.job_title === items[0].name)
-        : undefined;
-    const next: JobInput = {
-      ...job,
-      job_title: items.map((item) => item.name).join('、'),
-      jd_text: job.jd_text || saved?.jd_text || '',
-    };
+    const generated = generateJobDescription(items, jobs.data?.items);
+    const jdText = mergeJobDescription(job.jd_text, generatedJD.current, generated);
+    const title = items.map((item) => item.name).join('、');
+    if (title.length > 100 || jdText.length > 30000) {
+      void message.warning(
+        title.length > 100
+          ? '所选岗位名称合计超过 100 字，请减少岗位。'
+          : '聚合后的 JD 超过 30,000 字，请先精简现有内容。',
+      );
+      return;
+    }
+    generatedJD.current = generated;
+    const next: JobInput = { ...job, job_title: title, jd_text: jdText };
     setJob(next);
     cachedJob.current = null;
     setJobPickerOpen(false);
@@ -159,7 +176,9 @@ export default function NewInterview() {
         const created = await api.createJob(parsed.data);
         cachedJob.current = { payload, id: created.id };
       }
-      const ready = await readyJob(cachedJob.current!.id, { onProgress: setPhase });
+      const ready = await readyJob(cachedJob.current!.id, {
+        onProgress: setPhase,
+      });
       setPhase('正在生成专属面试计划');
       const input = {
         job_profile_id: ready.id,
@@ -235,15 +254,20 @@ export default function NewInterview() {
             <div className="form-grid">
               <label className="field">
                 目标级别
-                <select
+                <AppSelect
                   value={job.seniority}
-                  onChange={(e) => setJob({ ...job, seniority: e.target.value as JobInput['seniority'] })}
+                  onChange={(value) =>
+                    setJob({
+                      ...job,
+                      seniority: value as JobInput['seniority'],
+                    })
+                  }
                 >
                   <option value="JUNIOR">初级 · 0–2 年</option>
                   <option value="MIDDLE">中级 · 2–5 年</option>
                   <option value="SENIOR">高级 · 5 年以上</option>
                   <option value="EXPERT">专家 / 负责人</option>
-                </select>
+                </AppSelect>
               </label>
             </div>
             <label className="field">
@@ -261,13 +285,14 @@ export default function NewInterview() {
               <span className="field-footer">
                 <span>
                   <Sparkles size={12} />
-                  AI 将提取岗位的核心能力要求
+                  选择岗位后自动填充 JD，多岗位合并；可按目标职位自由修改
                 </span>
                 <span>{job.jd_text.length.toLocaleString()} / 30,000</span>
               </span>
             </label>
             <label className="field">
-              个人简历<span className="optional">选填 · 有助于针对项目经历提问</span>
+              个人简历
+              <span className="optional">选填 · 有助于针对项目经历提问</span>
             </label>
             {mode === 'demo' ? (
               <div className="upload-disabled">
@@ -291,9 +316,17 @@ export default function NewInterview() {
             <div className="mode-options">
               {(
                 [
-                  { mode: 'TEXT', icon: MessageSquare, caption: '专注思考，沉淀回答' },
+                  {
+                    mode: 'TEXT',
+                    icon: MessageSquare,
+                    caption: '专注思考，沉淀回答',
+                  },
                   { mode: 'VOICE', icon: Mic, caption: '连续对话，全程录音' },
-                  { mode: 'VIDEO', icon: Video, caption: '数字人对话，分屏录像' },
+                  {
+                    mode: 'VIDEO',
+                    icon: Video,
+                    caption: '数字人对话，分屏录像',
+                  },
                 ] as const
               ).map(({ mode: m, icon: Icon, caption }) => (
                 <button
@@ -313,23 +346,23 @@ export default function NewInterview() {
             <div className="form-grid">
               <label className="field">
                 面试难度
-                <select
+                <AppSelect
                   value={config.difficulty}
-                  onChange={(e) => changeConfig('difficulty', e.target.value as Config['difficulty'])}
+                  onChange={(value) => changeConfig('difficulty', value as Config['difficulty'])}
                 >
                   {Object.entries(difficulties).map(([v, t]) => (
                     <option value={v} key={v}>
                       {t}
                     </option>
                   ))}
-                </select>
+                </AppSelect>
               </label>
               <label className="field">
                 预计时长
-                <select
+                <AppSelect
                   value={config.duration_minutes}
-                  onChange={(e) =>
-                    changeConfig('duration_minutes', Number(e.target.value) as Config['duration_minutes'])
+                  onChange={(value) =>
+                    changeConfig('duration_minutes', Number(value) as Config['duration_minutes'])
                   }
                 >
                   {[15, 30, 45].map((n) => (
@@ -337,7 +370,7 @@ export default function NewInterview() {
                       {n} 分钟
                     </option>
                   ))}
-                </select>
+                </AppSelect>
               </label>
               <div className="field">
                 <span>提问节奏</span>
@@ -345,38 +378,38 @@ export default function NewInterview() {
               </div>
               <label className="field">
                 面试语言
-                <select
+                <AppSelect
                   value={config.language}
-                  onChange={(e) => changeConfig('language', e.target.value as Config['language'])}
+                  onChange={(value) => changeConfig('language', value as Config['language'])}
                 >
                   <option value="zh-CN">中文 · 普通话</option>
                   <option value="en-US">English · 英语</option>
-                </select>
+                </AppSelect>
               </label>
               <label className="field">
                 面试类型
-                <select
+                <AppSelect
                   value={config.interview_type}
-                  onChange={(e) => changeConfig('interview_type', e.target.value as Config['interview_type'])}
+                  onChange={(value) => changeConfig('interview_type', value as Config['interview_type'])}
                 >
                   <option value="COMPREHENSIVE">综合面试</option>
                   <option value="TECHNICAL">专业技术</option>
                   <option value="BEHAVIORAL">行为情境</option>
-                </select>
+                </AppSelect>
               </label>
               <label className="field">
                 每题最多追问
-                <select
+                <AppSelect
                   disabled={!config.allow_follow_up}
                   value={config.max_follow_ups}
-                  onChange={(e) => changeConfig('max_follow_ups', Number(e.target.value))}
+                  onChange={(value) => changeConfig('max_follow_ups', Number(value))}
                 >
                   {[0, 1, 2, 3].map((n) => (
                     <option key={n} value={n}>
                       {n} 次
                     </option>
                   ))}
-                </select>
+                </AppSelect>
               </label>
             </div>
             <label className="switch-field">
@@ -684,7 +717,10 @@ export default function NewInterview() {
                 type="button"
                 className="btn secondary"
                 onClick={() => {
-                  setJob((current) => ({ ...current, job_title: current.job_title || jobSearch.trim() }));
+                  setJob((current) => ({
+                    ...current,
+                    job_title: current.job_title || jobSearch.trim(),
+                  }));
                   cachedJob.current = null;
                   setJobPickerOpen(false);
                 }}

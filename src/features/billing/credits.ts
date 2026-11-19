@@ -13,18 +13,29 @@ export function availableCredits(
     : balance.remaining_interviews;
 }
 
-export function creditsText(product: { credits: number; interview_credits?: ModeCredits | null }) {
-  return product.interview_credits
+export function creditsText(product: {
+  credits: number;
+  interview_credits?: ModeCredits | null;
+  vip_days?: number;
+}) {
+  const training = product.interview_credits
     ? creditModes.map((mode) => `${creditLabels[mode]} ${product.interview_credits![mode]} 次`).join(' + ')
     : `通用 ${product.credits} 次`;
+  return [
+    product.credits > 0 || !product.vip_days ? training : '',
+    product.vip_days ? `VIP ${product.vip_days} 天` : '',
+  ]
+    .filter(Boolean)
+    .join(' + ');
 }
 
 export function sameCredits(
-  first: { credits: number; interview_credits?: ModeCredits | null },
-  second: { credits: number; interview_credits?: ModeCredits | null },
+  first: { credits: number; interview_credits?: ModeCredits | null; vip_days?: number },
+  second: { credits: number; interview_credits?: ModeCredits | null; vip_days?: number },
 ) {
   return (
     first.credits === second.credits &&
+    (first.vip_days ?? 0) === (second.vip_days ?? 0) &&
     !!first.interview_credits === !!second.interview_credits &&
     creditModes.every((mode) => first.interview_credits?.[mode] === second.interview_credits?.[mode])
   );

@@ -1,0 +1,64 @@
+.original-resume-modal {
+  top: 24px;
+  max-width: calc(100vw - 24px);
+  padding-bottom: 24px;
+}
+.original-resume-modal .ant-modal-content {
+  padding: 20px;
+}
+.original-resume-modal .ant-modal-title {
+  padding-right: 24px;
+  overflow-wrap: anywhere;
+}
+.resume-original-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 0 12px;
+  color: #7b89a3;
+  font-size: 12px;
+}
+.resume-original-toolbar > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.resume-original-viewer {
+  position: relative;
+  height: calc(100dvh - 190px);
+  min-height: 360px;
+  overflow: hidden;
+  background: #edf0f5;
+  border: 1px solid #e2e7ef;
+  border-radius: 10px;
+}
+.resume-original-viewer iframe {
+  display: block;
+  border: 0;
+  width: 100%;
+  height: 100%;
+}
+.resume-preview-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f5f7fbe6;
+}
+@media (max-width: 600px) {
+  .original-resume-modal {
+    top: 12px;
+  }
+  .original-resume-modal .ant-modal-content {
+    padding: 14px;
+  }
+  .resume-original-toolbar {
+    flex-wrap: wrap;
+  }
+  .resume-original-viewer {
+    height: calc(100dvh - 205px);
+  }
+}

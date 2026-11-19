@@ -31,6 +31,9 @@ import { erasePurchaseAttempts } from '../features/billing/purchase';
 
 const demo = () => useSession.getState().mode === 'demo';
 const userSchema = z.object({
+  membership: z
+    .object({ level: z.enum(['FREE', 'VIP']), active: z.boolean(), expires_at: z.string().nullable() })
+    .optional(),
   id: z.string(),
   uid: z.string().regex(/^[1-9][0-9]{7,18}$/),
   storage_owner_key: z.string().optional(),
@@ -112,7 +115,16 @@ export const api = {
         invitee_rewards: import('../types/domain').ModeCredits;
       };
       reward_records?: UsageRecord[];
-      recent: { id: string; registered_at: string; status: string; email?: string | null; nickname?: string | null; avatar_asset_id?: string | null; system_avatar_key?: string | null; avatar_url?: string | null }[];
+      recent: {
+        id: string;
+        registered_at: string;
+        status: string;
+        email?: string | null;
+        nickname?: string | null;
+        avatar_asset_id?: string | null;
+        system_avatar_key?: string | null;
+        avatar_url?: string | null;
+      }[];
     }>('GET', '/invitations/me'),
   async login(identity: string, nickname: string) {
     if (!devLoginEnabled) throw new Error('当前环境不提供开发登录');
@@ -122,7 +134,7 @@ export const api = {
   demoLogin: () => ({ access_token: 'local-demo', user: mock.user(), expires_in: 3600 }),
   me: async () => (demo() ? mock.user() : userSchema.parse(await request<User>('GET', '/users/me'))),
   products: async () => (demo() ? mock.products() : request<ProductCatalog>('GET', '/billing/products')),
-  entitlements: async () =>
+  entitlements: async (): Promise<Entitlements> =>
     demo() ? mock.entitlements() : request<Entitlements>('GET', '/billing/entitlements'),
   rewardUsage: async () =>
     demo()

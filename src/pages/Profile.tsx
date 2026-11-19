@@ -1,4 +1,6 @@
 import ResumeLibrary from '../features/resumes/ResumeLibrary';
+import { VipUpgradeCard } from '../features/billing/VipUpgrade';
+import VipAvatar from '../components/common/VipAvatar';
 import AccountSettings from '../features/accounts/AccountSettings';
 import { creditsText } from '../features/billing/credits';
 import { useState } from 'react';
@@ -150,6 +152,7 @@ export default function Profile() {
       <p className="muted mono" aria-label="用户 UID">
         UID {user?.uid || '—'}
       </p>
+      <VipUpgradeCard />
       <div className="profile-layout">
         <div className="profile-main">
           <details className="panel profile-disclosure profile-card">
@@ -168,7 +171,7 @@ export default function Profile() {
             </summary>
             <div className="profile-disclosure-content">
               <div className="profile-identity">
-                <span className="avatar large">
+                <VipAvatar className="avatar large">
                   {user?.system_avatar_key ? (
                     <SystemAvatar avatarKey={user.system_avatar_key} label="我的系统头像" />
                   ) : user?.avatar_url ? (
@@ -176,7 +179,7 @@ export default function Profile() {
                   ) : (
                     user?.nickname.slice(0, 1)
                   )}
-                </span>
+                </VipAvatar>
                 <div>
                   <h3>{user?.nickname}</h3>
                   <p>
@@ -356,6 +359,13 @@ export default function Profile() {
               <small> 次</small>
             </div>
             <p>
+              <span>
+                {user?.membership?.active
+                  ? `VIP 会员 · 有效期至 ${new Date(user.membership.expires_at!).toLocaleDateString('zh-CN')}`
+                  : '普通会员'}{' '}
+                · <Link to="/question-bank">大厂真题实操</Link>
+                <br />
+              </span>
               {user?.interview_credits && (
                 <>
                   {creditsText({

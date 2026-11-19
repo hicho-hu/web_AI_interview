@@ -28,7 +28,11 @@ client.interceptors.request.use((config) => {
   return config;
 });
 export async function request<T>(
-  method: string, path: string, body?: unknown, key?: string, options: { signal?: AbortSignal } = {},
+  method: string,
+  path: string,
+  body?: unknown,
+  key?: string,
+  options: { signal?: AbortSignal; timeout?: number } = {},
 ): Promise<T> {
   try {
     const response = await client.request({
@@ -36,6 +40,7 @@ export async function request<T>(
       url: path,
       data: body,
       signal: options.signal,
+      ...(options.timeout ? { timeout: options.timeout } : {}),
       headers: key ? { 'Idempotency-Key': key } : undefined,
     });
     const parsed = envelope.safeParse(response.data);

@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
-import type { BillingOrder, Entitlements, User } from '../../src/types/domain';
+import { categoryLabels, productCategory } from '../../src/features/billing/catalog';
+import type { BillingOrder, Entitlements, ProductCatalog, User } from '../../src/types/domain';
 
 test.skip(!process.env.LIVE_API, '显式启用 LIVE_API 后验证真实订单与权益接口');
 
@@ -24,9 +25,15 @@ test('FastAPI 权益购买：真实订单、模拟成功回调、权益持久化
     const initialResponse = await request.get('/api/v1/billing/entitlements', { headers });
     expect(initialResponse.ok()).toBe(true);
     const before = (await initialResponse.json()).data as Entitlements;
+    const catalogResponse = await request.get('/api/v1/billing/products', { headers });
+    expect(catalogResponse.ok()).toBe(true);
+    const catalog = (await catalogResponse.json()).data as ProductCatalog;
+    const product = catalog.items.find(item => item.credits > 0 && !item.vip_days)!;
+    expect(product).toBeTruthy();
+    await page.getByRole('tab', { name: categoryLabels[productCategory(product)], exact: true }).click();
     const packageCard = page
       .locator('.billing-product')
-      .filter({ has: page.getByRole('button', { name: '购买 10 次权益', exact: true }) });
+      .filter({ has: page.getByRole('button', { name: `购买 ${product.credits} 次权益`, exact: true }) });
     await expect(packageCard).toBeVisible();
     await packageCard.getByRole('button').click();
     const orderResponse = page.waitForResponse(
@@ -40,8 +47,8 @@ test('FastAPI 权益购买：真实订单、模拟成功回调、权益持久化
     const order = (await created.json()).data as BillingOrder;
     await expect(page.getByRole('dialog', { name: '权益购买成功' })).toBeVisible();
     await expect(page.getByRole('button', { name: '完成', exact: true })).toBeEnabled();
-    await expect(page.locator('.billing-balance-amount strong')).toHaveText(
-      String(before.remaining_interviews + order.credits),
+    await expect(page.locator('.billing-overview-total > strong')).toHaveText(
+      `${before.remaining_interviews + order.credits}次`,
     );
     const duplicate = await request.post(`/api/v1/billing/orders/${order.id}/dev-pay`, {
       headers: { ...headers, 'Idempotency-Key': `duplicate-callback-${Date.now()}` },
@@ -73,9 +80,10 @@ test('FastAPI 权益购买：真实订单、模拟成功回调、权益持久化
         Object.fromEntries(Object.entries(order.interview_credits).filter(([, quantity]) => quantity > 0)),
       );
     await page.reload();
-    await expect(page.locator('.billing-balance-amount strong')).toHaveText(
-      String(before.remaining_interviews + order.credits),
+    await expect(page.locator('.billing-overview-total > strong')).toHaveText(
+      `${before.remaining_interviews + order.credits}次`,
     );
+    await page.getByRole('tab', { name: '购买记录', exact: true }).click();
     await expect(page.getByRole('region', { name: '购买记录' })).toContainText('购买成功');
     await page.screenshot({ path: 'test-results/billing-live.png', fullPage: true });
 

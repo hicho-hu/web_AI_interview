@@ -24,6 +24,7 @@ export function Loading({ label = '正在加载…' }: { label?: string }) {
   );
 }
 export function ErrorState({ error, retry }: { error: unknown; retry?: () => void }) {
+  if (!error) return null;
   return (
     <div className="error-state" role="alert">
       <AlertCircle size={23} />

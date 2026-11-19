@@ -1,14 +1,12 @@
-import { closingMessage } from '../features/interviews/closing';
+import AppSelect from '../components/common/AppSelect';
 import { lazy, Suspense, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { Link, useParams } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { App } from 'antd';
+import { App, Tabs } from 'antd';
 import {
   ArrowLeft,
   ArrowRight,
-  Check,
-  ChevronDown,
   FileCheck2,
   Lightbulb,
   Printer,
@@ -16,38 +14,55 @@ import {
   RotateCcw,
   ShieldCheck,
   Sparkles,
-  Target,
 } from 'lucide-react';
 import { api } from '../services/api';
 import { completeOperation, operationKey } from '../services/client';
 import { queryClient } from '../app/query';
 import { ErrorState, Loading, PageHeading } from '../components/common/ui';
 import { dateText, modeLabels } from '../utils/interview';
+import { closingMessage } from '../features/interviews/closing';
 import SessionReplay from '../components/common/SessionReplay';
-const ScoreRadar = lazy(() => import('../components/charts/Charts').then((m) => ({ default: m.ScoreRadar })));
+import ExperienceFeedback from '../features/feedback/ExperienceFeedback';
+import '../styles/interview-pages-compact.css';
+import '../styles/interview-report-tabs.css';
+
+const ScoreRadar = lazy(() =>
+  import('../components/charts/Charts').then((module) => ({
+    default: module.ScoreRadar,
+  })),
+);
 
 export default function ReportPage() {
   const { id = '' } = useParams();
-  const { modal } = App.useApp();
-  const [expanded, setExpanded] = useState<string | null>(null);
+  const { modal, message } = App.useApp();
+  const [tab, setTab] = useState('overview');
+  const [selectedQuestion, setSelectedQuestion] = useState(0);
   const [printing, setPrinting] = useState(false);
-  function printReport() {
-    flushSync(() => setPrinting(true));
-    window.print();
-    setPrinting(false);
-  }
   const detail = useQuery({
     queryKey: ['interview', id],
     queryFn: () => api.detail(id),
-    refetchInterval: (q) => (q.state.data?.status === 'FINISHING' ? 1800 : false),
+    refetchInterval: (query) => (query.state.data?.status === 'FINISHING' ? 1800 : false),
   });
   const result = useQuery({
     queryKey: ['report', id],
     queryFn: () => api.report(id),
-    refetchInterval: (q) => (q.state.data?.status === 'FINISHING' ? 1800 : false),
+    refetchInterval: (query) => (query.state.data?.status === 'FINISHING' ? 1800 : false),
   });
   const report = result.data?.report;
   const item = detail.data;
+  async function printReport() {
+    try {
+      await import('../components/charts/Charts');
+      flushSync(() => setPrinting(true));
+      await new Promise(requestAnimationFrame);
+      await new Promise(requestAnimationFrame);
+      window.print();
+    } catch {
+      void message.error('打印内容加载失败，请稍后重试。');
+    } finally {
+      setPrinting(false);
+    }
+  }
   const regenerate = useMutation({
     mutationFn: async () => {
       const scope = `regenerate:${id}:${report?.version || 0}`;
@@ -59,11 +74,13 @@ export default function ReportPage() {
       completeOperation(scope);
     },
     onSuccess: async () => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ['report', id] }),
-        queryClient.invalidateQueries({ queryKey: ['interview', id] }),
-        queryClient.invalidateQueries({ queryKey: ['history-all'] }),
-      ]);
+      await Promise.all(
+        ['report', 'interview', 'history-all'].map((key) =>
+          queryClient.invalidateQueries({
+            queryKey: key === 'history-all' ? [key] : [key, id],
+          }),
+        ),
+      );
     },
   });
   if (detail.isPending || result.isPending) return <Loading label="正在读取你的面试复盘…" />;
@@ -79,7 +96,12 @@ export default function ReportPage() {
     );
   if (!report || item?.status === 'FINISHING')
     return (
-      <div>
+      <div className="report-page sim-report-compact">
+        <ExperienceFeedback
+          type="INTERVIEW"
+          id={id}
+          ready={!!item && ['FINISHING', 'COMPLETED', 'REPORT_FAILED'].includes(item.status)}
+        />
         <Link className="back-link" to="/history">
           <ArrowLeft size={15} />
           返回面试记录
@@ -103,11 +125,11 @@ export default function ReportPage() {
           </h1>
           <p>
             {item?.status === 'FINISHING'
-              ? 'AI 正在分析已完成的回答，整理可追溯的证据和改进建议。你可以稍后回来查看。'
+              ? 'AI 正在分析回答、整理证据与改进建议，完成后自动显示。'
               : '报告会在面试结束后生成。'}
           </p>
           {item?.status === 'FINISHING' ? (
-            <Loading label="正在生成报告，完成后自动显示…" />
+            <Loading label="正在生成报告…" />
           ) : item?.status === 'REPORT_FAILED' ? (
             <button
               className="btn primary"
@@ -123,31 +145,296 @@ export default function ReportPage() {
               <ArrowRight size={16} />
             </Link>
           )}
-          {regenerate.isError && <ErrorState error={regenerate.error} />}
+          <ErrorState error={regenerate.error} />
         </div>
-        <SessionReplay interviewId={id} />
       </div>
     );
-  return (
-    <div className="report-page">
+
+  const overview = (
+    <div className="report-tab-overview">
+      <section className="panel report-overview-compact">
+        <div className={`score-circle ${report.overall_score === null ? 'unassessed' : ''}`}>
+          <b>{report.overall_score ?? '—'}</b>
+          <small>{report.overall_score === null ? '无法判断' : '/ 100 分'}</small>
+        </div>
+        <div className="report-overview-copy">
+          <span className="section-kicker">YOUR INTERVIEW REVIEW</span>
+          <h2>本次面试综合表现</h2>
+          <p>{report.job_match_feedback}</p>
+          <div className="report-disclaimer">
+            <ShieldCheck size={14} />
+            <span>{report.disclaimer}</span>
+          </div>
+        </div>
+      </section>
+      <div className="sim-report-metrics">
+        {report.dimensions.map((dimension) => (
+          <button type="button" key={dimension.name} onClick={() => setTab('dimensions')}>
+            <span>{dimension.name}</span>
+            <strong>{dimension.score ?? '—'}</strong>
+          </button>
+        ))}
+      </div>
+      {!printing && (
+        <div className="report-advice-grid sim-overview-highlights">
+          <section className="panel advice-panel">
+            <h2>值得保持</h2>
+            {report.strengths.length ? (
+              <ul>
+                {report.strengths.slice(0, 2).map((text, index) => (
+                  <li key={index}>{text}</li>
+                ))}
+              </ul>
+            ) : (
+              <p className="muted">目前没有足够证据归纳明确优势。</p>
+            )}
+          </section>
+          <section className="panel advice-panel">
+            <h2>优先改进</h2>
+            <ul>
+              {report.gaps.slice(0, 2).map((text, index) => (
+                <li key={index}>{text}</li>
+              ))}
+            </ul>
+            <button className="text-link" onClick={() => setTab('advice')}>
+              查看完整提升建议
+              <ArrowRight size={13} />
+            </button>
+          </section>
+        </div>
+      )}
       {item && (
         <div className="panel interview-closing" role="status">
           <strong>面试官结束语</strong>
           <p>{item.closing_message || closingMessage(item.config.language)}</p>
         </div>
       )}
-      <SessionReplay interviewId={id} />
+    </div>
+  );
+  const dimensions = (
+    <section className="panel sim-dimensions-tab">
+      <div className="panel-heading">
+        <div>
+          <h2>能力维度分析</h2>
+          <p>评分、点评与回答证据集中展示。</p>
+        </div>
+      </div>
+      <div className="sim-dimension-layout">
+        <div className="sim-radar">
+          <Suspense fallback={<Loading label="正在加载维度图…" />}>
+            <ScoreRadar dimensions={report.dimensions} />
+          </Suspense>
+        </div>
+        <div className="dimension-grid">
+          {report.dimensions.map((dimension) => (
+            <article className="dimension-item" key={dimension.name}>
+              <div>
+                <strong>{dimension.name}</strong>
+                <b>
+                  {dimension.score ?? '无法判断'}
+                  {dimension.score !== null && <small> / 100</small>}
+                </b>
+              </div>
+              <p>{dimension.feedback}</p>
+              {dimension.evidence.length > 0 && (
+                <blockquote>
+                  <Quote size={13} />
+                  {dimension.evidence.join('；')}
+                </blockquote>
+              )}
+            </article>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+  const turns = report.original_turns || [];
+  const questionIndex = Math.min(selectedQuestion, Math.max(0, turns.length - 1));
+  const questions = (
+    <section className="panel reviews-panel sim-questions-tab">
+      <div className="panel-heading">
+        <div>
+          <h2>逐题复盘</h2>
+          <p>一次聚焦一道题，查看完整提问、回答和点评。</p>
+        </div>
+        <span className="tag">{turns.length} 轮回答</span>
+      </div>
+      {!!turns.length && !printing && (
+        <div className="sim-question-switcher">
+          <button
+            className="btn secondary small"
+            disabled={questionIndex === 0}
+            onClick={() => setSelectedQuestion((value) => value - 1)}
+          >
+            <ArrowLeft size={14} />
+            上一题
+          </button>
+          <AppSelect
+            aria-label="选择复盘题目"
+            value={questionIndex}
+            onChange={(value) => setSelectedQuestion(Number(value))}
+          >
+            {turns.map((turn, index) => (
+              <option key={turn.turn_id} value={index}>
+                第 {index + 1} 题 · {turn.question.slice(0, 45)}
+              </option>
+            ))}
+          </AppSelect>
+          <button
+            className="btn secondary small"
+            disabled={questionIndex >= turns.length - 1}
+            onClick={() => setSelectedQuestion((value) => value + 1)}
+          >
+            下一题
+            <ArrowRight size={14} />
+          </button>
+        </div>
+      )}
+      {(printing ? turns : turns.slice(questionIndex, questionIndex + 1)).map((turn, index) => {
+        const review = report.reviews.find((value) => value.turn_id === turn.turn_id);
+        return (
+          <article className="sim-question-review" key={turn.turn_id}>
+            <h3>
+              <span>第 {(printing ? index : questionIndex) + 1} 题</span>
+              {turn.question}
+            </h3>
+            <div className="original-answer">
+              <span>你的回答原文</span>
+              <p>{turn.answer || '本轮没有可用回答'}</p>
+            </div>
+            {review ? (
+              <>
+                <div className="review-summary">
+                  <b>回答摘要</b>
+                  <p>{review.summary}</p>
+                </div>
+                <div className="review-feedback-grid">
+                  {[
+                    {
+                      label: '回答亮点',
+                      values: review.strengths,
+                      className: 'positive',
+                    },
+                    {
+                      label: '可以更进一步',
+                      values: review.weaknesses,
+                      className: 'improve',
+                    },
+                    {
+                      label: '改进建议',
+                      values: review.suggestions,
+                      className: 'suggestion',
+                    },
+                  ].map((group) => (
+                    <div key={group.label} className={group.className}>
+                      <strong>{group.label}</strong>
+                      <ul>
+                        {group.values.map((text, i) => (
+                          <li key={i}>{text}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+                {!!review.evidence.length && (
+                  <blockquote className="evidence">
+                    <Quote size={16} />
+                    <div>
+                      <b>回答证据</b>
+                      {review.evidence.map((text, i) => (
+                        <p key={i}>“{text}”</p>
+                      ))}
+                    </div>
+                  </blockquote>
+                )}
+                <div className="reference-approach">
+                  <Lightbulb size={18} />
+                  <div>
+                    <b>参考组织思路</b>
+                    <p>{review.reference_approach}</p>
+                    <small>结合自己的真实经历使用参考思路。</small>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <p className="muted">本轮证据不足，无法判断。</p>
+            )}
+          </article>
+        );
+      })}
+      {!turns.length && (
+        <div className="empty-state">
+          <p>没有可用的回答证据，本次能力无法判断。</p>
+        </div>
+      )}
+    </section>
+  );
+  const advice = (
+    <div className="report-advice-grid sim-advice-tab">
+      <section className="panel advice-panel">
+        <h2>你的优势与提升空间</h2>
+        {report.strengths.length > 0 && (
+          <>
+            <h4>继续保持</h4>
+            <ul>
+              {report.strengths.map((text, index) => (
+                <li key={index}>{text}</li>
+              ))}
+            </ul>
+          </>
+        )}
+        <h4>值得强化</h4>
+        <ul>
+          {report.gaps.map((text, index) => (
+            <li key={index}>{text}</li>
+          ))}
+        </ul>
+      </section>
+      <section className="panel advice-panel next-practice">
+        <h2>下一次练习的重点</h2>
+        <ul>
+          {report.recommendations.map((text, index) => (
+            <li key={index}>{text}</li>
+          ))}
+        </ul>
+        <h4>推荐练习问题</h4>
+        {report.practice_questions.map((text, index) => (
+          <p className="practice-question" key={index}>
+            {text}
+          </p>
+        ))}
+      </section>
+    </div>
+  );
+  const tabs = [
+    { key: 'overview', label: '复盘概览', children: overview },
+    { key: 'dimensions', label: '维度分析', children: dimensions },
+    { key: 'questions', label: '逐题复盘', children: questions },
+    { key: 'advice', label: '提升建议', children: advice },
+    ...(item?.mode !== 'TEXT'
+      ? [
+          {
+            key: 'replay',
+            label: '面试回放',
+            children: <SessionReplay interviewId={id} />,
+          },
+        ]
+      : []),
+  ];
+  return (
+    <div className={`report-page sim-report-compact sim-report-tabs ${printing ? 'is-printing' : ''}`}>
+      <ExperienceFeedback type="INTERVIEW" id={id} ready />
       <Link className="back-link" to="/history">
         <ArrowLeft size={15} />
         返回面试记录
       </Link>
       <PageHeading
         eyebrow="EVERY ANSWER TELLS A STORY"
-        title="每一次复盘，都是下一步的起点"
+        title="模拟面试复盘"
         description={`${item?.job_title || '面试'} · ${item ? modeLabels[item.mode] : ''} · ${dateText(report.created_at, { year: 'numeric', month: 'long', day: 'numeric' })} · 报告 V${report.version}`}
       >
         <div className="inline no-print">
-          <button className="btn secondary" onClick={printReport}>
+          <button className="btn secondary" onClick={() => void printReport()}>
             <Printer size={15} />
             打印报告
           </button>
@@ -162,203 +449,29 @@ export default function ReportPage() {
           <Sparkles size={17} />
           <span>
             这是{report.model === 'local-demo' ? '本地演示' : '后端模拟 AI'}
-            报告，结果用于验证流程，不代表真实能力评价。
+            报告，用于验证流程，不代表真实能力评价。
           </span>
         </div>
       )}
-      <div className="report-summary-grid">
-        <section className="panel report-score-panel">
-          <span className="section-kicker">YOUR INTERVIEW REVIEW</span>
-          <h2>本次面试综合表现</h2>
-          <div className={`score-circle ${report.overall_score === null ? 'unassessed' : ''}`}>
-            <b>{report.overall_score ?? '—'}</b>
-            <small>{report.overall_score === null ? '无法判断' : '/ 100 分'}</small>
-          </div>
-          <p>{report.job_match_feedback}</p>
-          <div className="report-disclaimer">
-            <ShieldCheck size={15} />
-            <span>{report.disclaimer}</span>
-          </div>
-        </section>
-        <section className="panel radar-panel">
-          <div className="panel-heading">
-            <div>
-              <h2>能力维度画像</h2>
-              <p>每一个判断，都应有回答作为依据</p>
-            </div>
-            <span className="chart-legend">
-              <i />
-              本次表现
-            </span>
-          </div>
-          <Suspense fallback={<Loading />}>
-            <ScoreRadar dimensions={report.dimensions} />
-          </Suspense>
-        </section>
-      </div>
-      <section className="panel dimensions-panel">
-        <div className="panel-heading">
-          <div>
-            <h2>把反馈说具体</h2>
-            <p>六个维度，找到值得继续打磨的方向</p>
-          </div>
-          <Target size={20} className="muted" />
-        </div>
-        <div className="dimension-grid">
-          {report.dimensions.map((d) => (
-            <div className="dimension-item" key={d.name}>
-              <div>
-                <strong>{d.name}</strong>
-                <b>
-                  {d.score ?? '无法判断'}
-                  {d.score !== null && <small> / 100</small>}
-                </b>
-              </div>
-              <p>{d.feedback}</p>
-              {d.evidence.length > 0 && (
-                <blockquote>
-                  <Quote size={13} />
-                  {d.evidence.join('；')}
-                </blockquote>
-              )}
-            </div>
-          ))}
-        </div>
-      </section>
-      <section className="panel reviews-panel">
-        <div className="panel-heading">
-          <div>
-            <h2>回到每一道题，找到进步的线索</h2>
-            <p>保留原始回答，从具体证据出发复盘</p>
-          </div>
-          <span className="tag">{report.reviews.length} 轮有效回答</span>
-        </div>
-        {report.original_turns?.map((t, i) => {
-          const review = report.reviews.find((r) => r.turn_id === t.turn_id);
-          const open = printing || expanded === t.turn_id;
-          return (
-            <div className="review-item" key={t.turn_id}>
-              <button
-                className="review-toggle"
-                aria-expanded={open}
-                onClick={() => setExpanded(open ? null : t.turn_id)}
-              >
-                <span className="review-number">{String(i + 1).padStart(2, '0')}</span>
-                <strong>{t.question}</strong>
-                <ChevronDown size={18} className={open ? 'rotated' : ''} />
-              </button>
-              {open && (
-                <div className="review-content">
-                  <div className="original-answer">
-                    <span>你的回答原文</span>
-                    <p>{t.answer || '本轮没有可用回答'}</p>
-                  </div>
-                  {review ? (
-                    <>
-                      <div className="review-summary">
-                        <b>回答摘要</b>
-                        <p>{review.summary}</p>
-                      </div>
-                      <div className="review-feedback-grid">
-                        {[
-                          { label: '回答亮点', values: review.strengths, className: 'positive' },
-                          { label: '可以更进一步', values: review.weaknesses, className: 'improve' },
-                          { label: '改进建议', values: review.suggestions, className: 'suggestion' },
-                        ].map(({ label, values, className }) => (
-                          <div key={label} className={className}>
-                            <strong>{label}</strong>
-                            <ul>
-                              {values.map((text, j) => (
-                                <li key={j}>{text}</li>
-                              ))}
-                            </ul>
-                          </div>
-                        ))}
-                      </div>
-                      {!!review.evidence.length && (
-                        <blockquote className="evidence">
-                          <Quote size={16} />
-                          <div>
-                            <b>回答证据</b>
-                            {review.evidence.map((e, j) => (
-                              <p key={j}>“{e}”</p>
-                            ))}
-                          </div>
-                        </blockquote>
-                      )}
-                      <div className="reference-approach">
-                        <Lightbulb size={18} />
-                        <div>
-                          <b>参考组织思路</b>
-                          <p>{review.reference_approach}</p>
-                          <small>使用你自己的真实经历，不将示例思路当作个人事实。</small>
-                        </div>
-                      </div>
-                    </>
-                  ) : (
-                    <p className="muted">本轮证据不足，无法判断。</p>
-                  )}
-                </div>
-              )}
-            </div>
-          );
-        })}
-        {!report.original_turns?.length && (
-          <div className="empty-state">
-            <p>没有可用的回答证据，本次能力无法判断。</p>
-          </div>
-        )}
-      </section>
-      <div className="report-advice-grid">
-        <section className="panel advice-panel">
-          <span className="advice-icon">
-            <Check size={21} />
-          </span>
-          <h2>你的优势与提升空间</h2>
-          {report.strengths.length > 0 && (
-            <>
-              <h4>继续保持</h4>
-              <ul>
-                {report.strengths.map((s, i) => (
-                  <li key={i}>{s}</li>
-                ))}
-              </ul>
-            </>
-          )}
-          <h4>值得强化</h4>
-          <ul>
-            {report.gaps.map((s, i) => (
-              <li key={i}>{s}</li>
-            ))}
-          </ul>
-        </section>
-        <section className="panel advice-panel next-practice">
-          <span className="advice-icon">
-            <Sparkles size={21} />
-          </span>
-          <h2>让下一次练习，更有方向</h2>
-          <ul>
-            {report.recommendations.map((s, i) => (
-              <li key={i}>{s}</li>
-            ))}
-          </ul>
-          <h4>推荐练习问题</h4>
-          {report.practice_questions.map((s, i) => (
-            <p className="practice-question" key={i}>
-              {s}
-            </p>
-          ))}
-        </section>
-      </div>
+      {printing ? (
+        <>
+          {overview}
+          {dimensions}
+          {questions}
+          {advice}
+        </>
+      ) : (
+        <Tabs activeKey={tab} onChange={setTab} items={tabs} className="sim-report-main-tabs" />
+      )}
       <div className="report-bottom no-print">
-        <span className="muted">报告结果仅用于求职训练，不代表真实招聘评价。</span>
+        <span className="muted">报告结果仅用于求职训练。</span>
         <button
           className="text-link"
           disabled={regenerate.isPending}
           onClick={() =>
             modal.confirm({
               title: '重新生成报告？',
-              content: '将基于本次已完成的回答生成新版本。历史评分可能随报告变化。',
+              content: '将基于本次已完成的回答生成新版本。',
               okText: '重新生成',
               cancelText: '保留当前报告',
               onOk: () => regenerate.mutateAsync(),
@@ -369,7 +482,7 @@ export default function ReportPage() {
           {regenerate.isPending ? '正在请求…' : '重新生成报告'}
         </button>
       </div>
-      {regenerate.isError && <ErrorState error={regenerate.error} />}
+      <ErrorState error={regenerate.error} />
     </div>
   );
 }

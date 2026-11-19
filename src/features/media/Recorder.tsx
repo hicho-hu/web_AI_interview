@@ -11,16 +11,22 @@ export default function Recorder({
   mode,
   interviewId,
   turnId,
+  practiceId,
   disabled,
   onUploaded,
   onDirty,
+  autoUpload = false,
+  onUploadingChange,
 }: {
   mode: Mode;
-  interviewId: string;
+  interviewId?: string;
   turnId: string;
+  practiceId?: string;
   disabled: boolean;
   onUploaded: (assetId: string, duration: number) => Promise<void>;
   onDirty: (dirty: boolean) => void;
+  autoUpload?: boolean;
+  onUploadingChange?: (busy: boolean) => void;
 }) {
   const [state, setState] = useState<'idle' | 'recording' | 'ready' | 'uploading'>('idle');
   const [blob, setBlob] = useState<Blob | null>(null);
@@ -116,9 +122,11 @@ export default function Recorder({
         if (!mounted.current) return;
         const type = rec.mimeType.split(';')[0];
         const result = new Blob(chunks, { type });
-        setDuration(Math.max(1, Math.min(limit * 1000, Date.now() - started.current)));
+        const recordedDuration = Math.max(1, Math.min(limit * 1000, Date.now() - started.current));
+        setDuration(recordedDuration);
         setBlob(result);
         setState('ready');
+        if (autoUpload) void upload(result, recordedDuration);
         if (video.current) video.current.srcObject = null;
       };
       rec.onerror = () => {
@@ -161,35 +169,39 @@ export default function Recorder({
       );
     }
   }
-  async function upload() {
-    if (!blob) return;
+  async function upload(recordedBlob = blob, recordedDuration = duration) {
+    if (!recordedBlob) return;
     setState('uploading');
+    onUploadingChange?.(true);
     setError(null);
     try {
       if (!uploaded.current) {
         const ticket = await uploadFile(
-          blob,
+          recordedBlob,
           {
-            filename: `answer-${turnId}.${blob.type.includes('mp4') ? (mode === 'VIDEO' ? 'mp4' : 'm4a') : 'webm'}`,
-            content_type: blob.type,
-            size: blob.size,
-            media_type: mode === 'VIDEO' ? 'VIDEO' : 'AUDIO',
-            interview_id: interviewId,
-            turn_id: turnId,
-            duration_ms: duration,
+            filename: `answer-${turnId}.${recordedBlob.type.includes('mp4') ? (mode === 'VIDEO' ? 'mp4' : 'm4a') : 'webm'}`,
+            content_type: recordedBlob.type,
+            size: recordedBlob.size,
+            media_type: practiceId ? 'PRACTICE_AUDIO' : mode === 'VIDEO' ? 'VIDEO' : 'AUDIO',
+            ...(practiceId
+              ? { practice_session_id: practiceId }
+              : { interview_id: interviewId, turn_id: turnId }),
+            duration_ms: recordedDuration,
           },
           setProgress,
         );
         uploaded.current = ticket.asset_id;
       }
-      await onUploaded(uploaded.current, duration);
+      await onUploaded(uploaded.current, recordedDuration);
       setBlob(null);
       setState('idle');
       onDirty(false);
-      void message.success('回答已提交，正在处理');
+      void message.success(autoUpload ? '录音已转成文字，可继续编辑' : '回答已提交，正在处理');
     } catch (e) {
       setError(e);
       setState('ready');
+    } finally {
+      onUploadingChange?.(false);
     }
   }
   return (
@@ -216,7 +228,7 @@ export default function Recorder({
             <p>
               {state === 'recording'
                 ? formatClock(seconds)
-                : `每段最长 ${limit / 60} 分钟，停止后可回放或重录`}
+                : `每段最长 ${limit / 60} 分钟，${autoUpload ? '停止后自动转成文字' : '停止后可回放或重录'}`}
             </p>
             {state === 'recording' && (
               <div className="record-wave">
@@ -269,13 +281,13 @@ export default function Recorder({
             </button>
             <button className="btn primary" disabled={disabled} onClick={() => void upload()}>
               <Upload size={16} />
-              上传并提交回答
+              {autoUpload ? '重试转成文字' : '上传并提交回答'}
             </button>
           </>
         ) : state === 'uploading' ? (
           <span className="inline muted">
             <LoaderCircle className="spin" size={17} />
-            上传并确认中 {progress}%
+            {autoUpload ? '上传并转写中' : '上传并确认中'} {progress}%
           </span>
         ) : (
           <button className="btn primary" disabled={disabled || !consent} onClick={() => void start()}>
@@ -284,7 +296,7 @@ export default function Recorder({
           </button>
         )}
       </div>
-      <p className="record-local-note">未提交的录制仅保存在当前页面，刷新或离开后会丢失。</p>
+      <p className="record-local-note">{autoUpload ? '停止录制后自动转写并追加到回答，仍需提交文本才能完成作答。' : '未提交的录制仅保存在当前页面，刷新或离开后会丢失。'}</p>
     </div>
   );
 }

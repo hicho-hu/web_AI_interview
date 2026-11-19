@@ -1,4 +1,5 @@
 import { creditsText } from '../../features/billing/credits';
+import VipAvatar from '../common/VipAvatar';
 import { useEffect, useRef, useState } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
@@ -50,6 +51,7 @@ const routes = [
   { to: '/dashboard', label: '我的工作台', icon: LayoutDashboard },
   { to: '/interviews/new', label: '开始模拟面试', icon: Sparkles },
   { to: '/history', label: '面试记录', icon: History },
+  { to: '/question-bank', label: '大厂真题实操', icon: BookOpen },
   { to: '/billing', label: '我的权益', icon: Wallet },
   { to: '/invitations', label: '邀请好友', icon: UsersRound },
   { to: '/profile', label: '个人中心', icon: UserRound },
@@ -159,7 +161,7 @@ export default function Shell() {
             <ArrowUpRight size={15} />
           </button>
           <div className="sidebar-user">
-            <span className="avatar">{user?.nickname?.slice(0, 1) || '我'}</span>
+            <VipAvatar />
             <Link to="/profile">
               <strong>{user?.nickname || '求职者'}</strong>
               <small>{mode === 'demo' ? '本地演示账号' : '面试练习者'}</small>
@@ -202,7 +204,7 @@ export default function Shell() {
             </span>
             <span className="topbar-separator" />
             <button className="topbar-profile" onClick={() => navigate('/profile')}>
-              <span className="avatar small">{user?.nickname?.slice(0, 1)}</span>
+              <VipAvatar className="avatar small" />
               <span>{user?.nickname}</span>
               <ChevronDown size={14} />
             </button>
