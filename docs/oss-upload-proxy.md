@@ -1,4 +1,4 @@
-# OSS 上传与 AI 语音同源代理
+# OSS 文件访问同源代理
 
 Web 默认将 OSS SDK 的上传请求发送至当前页面 Origin 下的 `/ai-interview/user/{user_id}/incoming/{asset_id}.{ext}`。Web 的 Nginx 或 Vite 将请求转发到固定 OSS Bucket，保留对象路径、查询参数、签名、STS Token、Content-Type 和 ETag。浏览器不再直连 OSS，上传不依赖 Bucket CORS；无需新增 Python 后端接口或修改后端配置。
 
@@ -9,13 +9,13 @@ STS 凭证仍由后端按当前用户、资产和到期时间签发。代理不�
 当前默认目标为 `https://ai-interview-storage.oss-cn-hangzhou.aliyuncs.com`，与后端 `OSS_BUCKET_NAME=ai-interview-storage`、`OSS_ENDPOINT=https://oss-cn-hangzhou.aliyuncs.com` 一致。
 
 1. 更新 Web 项目，执行 `npm run build`，部署新的 `dist/`。
-2. 将本项目 `nginx.conf` 中的 incoming 上传、generated 音频 `location` 和 `/ai-interview/` 兜底规则加入**实际提供 Web 页面的 server 块**；`oss_audio` 日志格式放在 `http` 上下文。已有 HTTPS/证书配置保留；`/api` 仍指向原后端。
+2. 将本项目 `nginx.conf` 中的 incoming 上传、generated/accepted 只读 `location` 和 `/ai-interview/` 兜底规则加入**实际提供 Web 页面的 server 块**；`oss_read` 日志格式放在 `http` 上下文。同步页面 CSP，使简历 Blob 预览可以加载。已有 HTTPS/证书配置保留；`/api` 仍指向原后端。
 3. 执行 `nginx -t`，通过后执行 `nginx -s reload`。Docker 部署重建 Web 镜像并重建容器即可，Dockerfile 已包含完整配置。
 4. 浏览器刷新后上传合成 PDF 测试文件；网络面板应显示 `PUT /ai-interview/user/.../incoming/....pdf` 发往 Web 自身 Origin，随后 `/media/{asset_id}/complete` 成功。8 MB 以上文件会依次发起带 `uploads`、`uploadId`、`partNumber` 的分片请求。
 
 只更新 `dist/`、只更新 Python 后端或只修改后端 `CORS_ORIGINS` 不会安装 Web 上传代理。若外层 Nginx 直接提供静态文件，必须修改外层 Nginx；若外层将整个站点转发至本项目 Web 容器或 Vite，则需让上述路径也转发到该 Web 服务。上传代理占用 Web 服务器带宽。
 
-上传代理仅转发 incoming 文件命名空间到固定 Bucket；音频读取仅允许 generated 下的 WAV/MP3。禁止把目标主机改为浏览器传入的任意 URL。`proxy_pass` 后不要添加路径或尾部 `/`，不要重写对象路径和查询参数；它们参与 OSS 签名。上传须保留 OSS Authorization 和 `x-oss-*` 头，并用 Bucket 域名作为 Host/SNI。Nginx 清除 Origin 和站点 Cookie，以避免把浏览器跨域检查或站点 Cookie 传给 OSS；TLS 证书仍会校验。
+上传代理仅转发 incoming 命名空间；读取只允许 generated 下的 WAV/MP3，以及 accepted 下的 PDF、DOCX、PNG、JPG/JPEG、WAV、MP3、M4A、MP4、AAC、WEBM、VTT，与当前后端文件类型一致。HTML、SVG、嵌套任意路径和写入 accepted 均不转发。目标固定为配置的 Bucket，不能由浏览器传入任意 URL。`proxy_pass` 后不要添加路径或尾部 `/`，不要重写路径和查询参数；它们参与 OSS 签名。上传须保留 OSS Authorization 和 `x-oss-*` 头；读取使用原签名查询并清除站点 Authorization。两者都以 Bucket 域名作为 Host/SNI，清除 Origin 和 Cookie，保留 TLS 证书校验。
 
 ## Web 配置
 
@@ -25,15 +25,35 @@ VITE_OSS_UPLOAD_MODE=proxy
 # AI 提问、结束语和真题提问音频，独立于上传模式。
 VITE_OSS_AUDIO_MODE=proxy
 VITE_OSS_AUDIO_HOST=ai-interview-storage.oss-cn-hangzhou.aliyuncs.com
+# accepted 图片、录音、录像、字幕及默认简历访问。
+VITE_OSS_MEDIA_MODE=proxy
+VITE_OSS_MEDIA_HOST=ai-interview-storage.oss-cn-hangzhou.aliyuncs.com
+# 可单独覆盖简历模式和主机名；省略时继承 MEDIA 配置。
+VITE_OSS_RESUME_MODE=proxy
+VITE_OSS_RESUME_HOST=ai-interview-storage.oss-cn-hangzhou.aliyuncs.com
 # 仅供 npm run dev / npm run preview 使用。
 OSS_UPLOAD_TARGET=https://ai-interview-storage.oss-cn-hangzhou.aliyuncs.com
 ```
 
-更换 Bucket 时同步修改 `OSS_UPLOAD_TARGET`、`VITE_OSS_AUDIO_HOST` 和生产 `nginx.conf` 中两处 `proxy_pass`、`proxy_set_header Host`，使它们与后端保持一致。`VITE_OSS_AUDIO_HOST` 仅填 Bucket 主机名，不含协议或路径；`OSS_UPLOAD_TARGET` 不会在构建时自动改写 Nginx。
+更换 Bucket 时同步修改 `OSS_UPLOAD_TARGET`、各 `VITE_OSS_*_HOST` 和生产 `nginx.conf` 中两处 `proxy_pass`、`proxy_set_header Host`。主机名不含协议或路径；`OSS_UPLOAD_TARGET` 不会在构建时自动改写 Nginx。当前 Nginx 上传和读取使用同一 Bucket，如需拆分存储，应同时调整固定代理规则。
 
 需要恢复浏览器直连时，设置 `VITE_OSS_UPLOAD_MODE=direct` 并重新构建。此模式仍要求 OSS 配置精确的 Web Origin、PUT/POST/GET/HEAD/DELETE、AllowedHeader `*` 及 ExposeHeader `ETag,x-oss-request-id`，参考 [跨域规则模板](oss-cors.xml)。
 
-头像、简历、岗位图片、回答和整场录音录像共享这一上传链路。accepted 下的用户文件下载及整场录制回放仍使用后端签发的 OSS URL；AI 生成的语音使用下述只读代理。
+头像、简历、岗位图片、回答和整场录音录像共享上传链路。所有支持的 accepted 文件共用只读代理，统一地址处理位于 `src/features/media/urls.ts`；客户端和 Vite 复用 `config/ossPaths.ts` 的路径范围，避免后续按页面补漏。
+
+## 头像、云端回放、字幕与下载
+
+导航、个人资料、头像设置和邀请列表中的自定义头像均经过统一地址转换，不需要放宽 `img-src 'self' data: blob:`。系统头像和公司品牌静态资源继续同源加载。
+
+整场云端录音、录像和 VTT 字幕都走 accepted 只读路径。字幕经同源 `fetch` 读取后转成 Blob，供字幕展示与下载。回放源加载失败时显示中文提示，并提供“刷新回放链接”；刷新会重新获取授权地址并重载播放器。云端录音下载扩展名按媒体 Content-Type 生成。
+
+录音、录像下载使用同源地址，使浏览器能执行 `download` 属性并保留文件名。跨域 URL 的 `download` 属性通常不生效；仅将它加在 OSS 直连链接上不能保证下载行为。代理保留原始文件字节和 Range/206，不把大录像整体读入前端内存。
+
+设置 `VITE_OSS_MEDIA_MODE=direct` 可恢复 accepted 文件直连；仍须配置实际 HTTPS Origin 的 GET/HEAD CORS。图片直连还需在生产 CSP 的 img-src 中允许具体 Bucket 主机，跨域下载也应由存储响应的 Content-Disposition 决定文件名。默认同源模式不需要上述额外配置。
+
+Web `/api/` 的读取超时为 300 秒，以覆盖真题回答等客户端最长 180 秒的 AI 请求；SSE 继续关闭缓冲，WebSocket 继续转发 Upgrade/Connection。后端 ASR/TTS 服务间使用的 OSS 签名链接不做前端地址转换。
+
+参考：[CSP img-src](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy/img-src)、[浏览器 download 属性](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/a#download)。
 
 ## AI 面试官语音播放
 
@@ -51,6 +71,20 @@ Web 默认将配置 Bucket 的 `/ai-interview/user/{user_id}/generated/{asset_id
 部署时必须同时更新 `dist/` 与 Nginx 配置；Docker 部署重新构建并重建 Web 容器。验收时 Network 应显示音频 GET 发往 Web 自身 Origin，成功后提问会播放并出现在整场录制中。
 
 如采用浏览器直连，设置 `VITE_OSS_AUDIO_MODE=direct` 后重新构建，并在 OSS 上合并允许实际 HTTPS Origin 的 GET/HEAD 跨域规则。修改仓库的 XML 示例不会自动修改 Bucket。
+
+## 简历原文件预览与下载
+
+简历列表及 `/resumes/{id}` 返回 200 仅表示元数据读取成功。预览会再次获取该简历详情以刷新签名，再用 `fetch` 读取原文件。2026-11-22 检查发现 accepted 路径未被原音频代理覆盖，仍由浏览器直连 OSS；生产 HTTPS Origin 的 GET 预检返回 403、`EC=0003-00000602`，与预览的 `Failed to fetch` 相符。
+
+默认模式将配置 Bucket 的 `/ai-interview/user/{user_id}/accepted/{asset_id}.pdf` 或 `.docx` 转换为站点同源地址，保留原始签名查询，由固定 OSS 上游校验授权。该路径仅允许 GET/HEAD；原文件、Content-Type、Range/206 和上游错误状态保持不变，代理不缓存、不记录签名查询，不转发站点 Cookie 或 Authorization。
+
+PDF 在获取并检查文件头后通过本地 Blob iframe 预览；生产 CSP 显式允许 `frame-src 'self' blob:`。DOCX 在原有沙箱 iframe 中渲染，仍禁用脚本、外部资源和 altChunk HTML。网络失败显示中文提示，点击重试会重新获取详情与签名。
+
+部署须同时更新 Web 构建产物与完整 Nginx 配置（包括 `oss_read` 日志格式、accepted 只读路径和 CSP）。Docker 部署重新构建并重建 Web 容器；只重启旧容器不会安装新配置。部署前执行 `nginx -t`。验收使用合成 PDF/DOCX，在个人中心打开简历预览，Network 中原文件 GET 应发往站点同源地址，并验证预览、重试与下载。
+
+若需要直连模式，设置 `VITE_OSS_RESUME_MODE=direct` 并重新构建，同时在 OSS 上合并允许实际 HTTPS Origin 的 GET/HEAD CORS 规则。上传、AI 音频和简历直连模式分别配置。
+
+参考：[CSP frame-src](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy/frame-src)。
 
 ## 生产上传返回 502
 

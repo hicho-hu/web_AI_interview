@@ -8,6 +8,7 @@ import { ErrorState, Loading, PageHeading } from '../components/common/ui';
 import { creditsText } from '../features/billing/credits';
 import { dateText } from '../utils/interview';
 import { SystemAvatar } from '../components/common/SystemAvatar';
+import { signedUrl } from '../features/media/urls';
 import type { ModeCredits, UsageRecord } from '../types/domain';
 
 const rewardText = (rewards: ModeCredits) =>
@@ -153,7 +154,7 @@ export default function Invitations() {
               {data.recent.length ? (
                 data.recent.map((row) => (
                   <div className="invitation-friend-row" key={row.id}>
-                    {row.avatar_url ? <img src={row.avatar_url} alt="" /> : <SystemAvatar avatarKey={row.system_avatar_key} label={row.nickname || '受邀好友'} />}
+                    {row.avatar_url ? <img src={signedUrl(row.avatar_url)} alt="" /> : <SystemAvatar avatarKey={row.system_avatar_key} label={row.nickname || '受邀好友'} />}
                     <span className="invitation-friend-info"><strong>{row.nickname || '新用户'}</strong><small>{row.email || '邮箱未提供'}</small></span>
                     <time>{dateText(row.registered_at)}</time>
                     <span className="tag green">已注册</span>

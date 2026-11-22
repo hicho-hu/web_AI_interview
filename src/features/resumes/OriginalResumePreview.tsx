@@ -38,6 +38,9 @@ export default function OriginalResumePreview({ resume, onClose }: { resume: Res
       const response = await fetch(signedUrl(latest.download_url), {
         signal: controller.signal,
         credentials: 'omit',
+      }).catch((reason: unknown) => {
+        if (controller.signal.aborted) throw reason;
+        throw new Error('简历原文件连接失败，请重试；持续失败请联系管理员。');
       });
       if (!response.ok) throw new Error('原文件读取失败，请重试。');
       if (Number(response.headers.get('content-length')) > maxBytes)

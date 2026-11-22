@@ -8,6 +8,7 @@ import { ErrorState } from '../../components/common/ui';
 import { SystemAvatar } from '../../components/common/SystemAvatar';
 import { useEmailCode } from './useEmailCode';
 import { uploadFile } from '../media/upload';
+import { signedUrl } from '../media/urls';
 import type { LoginResult, User } from '../../types/domain';
 
 const isValidEmail = (value: string) =>
@@ -168,7 +169,7 @@ export default function AccountSettings() {
                 label="当前系统头像"
               />
             ) : user?.avatar_url ? (
-              <img src={user.avatar_url} alt="当前头像" />
+              <img src={signedUrl(user.avatar_url)} alt="当前头像" />
             ) : (
               <span className="account-avatar-initial">
                 {user?.nickname.slice(0, 1)}

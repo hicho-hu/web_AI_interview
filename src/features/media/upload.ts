@@ -2,31 +2,9 @@ import type { UploadInput, UploadTicket } from '../../types/domain';
 import { api } from '../../services/api';
 import { ApiError } from '../../services/client';
 import { uploadOSS } from '../../services/oss';
+import { signedUrl } from './urls';
+export { signedUrl } from './urls';
 
-export function signedUrl(url: string) {
-  const parsed = new URL(url, window.location.origin);
-  const base = new URL(import.meta.env.VITE_API_BASE_URL || '/api/v1', window.location.origin);
-  if (
-    parsed.pathname.startsWith('/api/v1/local-objects/') &&
-    ['localhost', '127.0.0.1'].includes(parsed.hostname)
-  ) {
-    return new URL(`${parsed.pathname}${parsed.search}`, base.origin).href;
-  }
-  // Web Audio fetches need CORS even when the signed OSS URL is valid. Keep the
-  // generated audio path and signed query intact through the fixed Web proxy.
-  const audioHost =
-    import.meta.env.VITE_OSS_AUDIO_HOST || 'ai-interview-storage.oss-cn-hangzhou.aliyuncs.com';
-  if (
-    import.meta.env.VITE_OSS_AUDIO_MODE !== 'direct' &&
-    parsed.origin === `https://${audioHost}` &&
-    !parsed.username &&
-    !parsed.password &&
-    /^\/ai-interview\/user\/[A-Za-z0-9-]+\/generated\/[A-Za-z0-9-]+\.(?:wav|mp3)$/.test(parsed.pathname)
-  ) {
-    return new URL(`${parsed.pathname}${parsed.search}`, window.location.origin).href;
-  }
-  return parsed.href;
-}
 function put(ticket: UploadTicket, file: Blob, onProgress: (value: number) => void) {
   return new Promise<void>((resolve, reject) => {
     const xhr = new XMLHttpRequest();

@@ -2,7 +2,10 @@ import { createServer as createHTTPServer, type IncomingHttpHeaders } from 'node
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, expect, it } from 'vitest';
 import { createServer, type ViteDevServer } from 'vite';
-import { ossAudioProxy, ossUploadProxy } from '../config/ossProxy';
+import { ossAudioProxy, ossMediaProxy, ossUploadProxy } from '../config/ossProxy';
+
+const pdf = Buffer.from('%PDF-1.7\nSynthetic resume\x00\xff\n%%EOF');
+const docx = Buffer.from([0x50, 0x4b, 3, 4, 0, 255, 128]);
 
 const received: { url: string; method: string; headers: IncomingHttpHeaders; body: Buffer }[] = [];
 const upstream = createHTTPServer(async (request, response) => {
@@ -19,6 +22,20 @@ const upstream = createHTTPServer(async (request, response) => {
   if (request.url!.includes('uploadId=expired')) {
     response.writeHead(403, { 'Content-Type': 'application/xml' });
     response.end('<Error><Code>AccessDenied</Code></Error>');
+  } else if (request.url!.startsWith('/ai-interview/user/test-owner/accepted/')) {
+    const word = request.url!.split('?')[0].endsWith('.docx');
+    const bytes = word ? docx : pdf;
+    response.setHeader(
+      'Content-Type',
+      word ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' : 'application/pdf',
+    );
+    if (request.headers.range === 'bytes=0-4') {
+      response.writeHead(206, { 'Content-Range': `bytes 0-4/${bytes.length}` });
+      response.end(bytes.subarray(0, 5));
+    } else {
+      response.setHeader('Content-Length', bytes.length);
+      response.end(bytes);
+    }
   } else response.end('ok');
 });
 let vite: ViteDevServer;
@@ -26,6 +43,7 @@ let origin: string;
 let upstreamHost: string;
 const key = '/ai-interview/user/test-owner/incoming/asset-a.pdf';
 const audioKey = '/ai-interview/user/test-owner/generated/question-a.wav';
+const resumeKey = '/ai-interview/user/test-owner/accepted/resume-a.pdf';
 
 beforeAll(async () => {
   await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
@@ -40,6 +58,7 @@ beforeAll(async () => {
       proxy: {
         ...ossUploadProxy(`http://${upstreamHost}`),
         ...ossAudioProxy(`http://${upstreamHost}`),
+        ...ossMediaProxy(`http://${upstreamHost}`),
       },
     },
   });
@@ -101,7 +120,7 @@ it('passes multipart POST XML and OSS error statuses through the proxy', async (
   expect(received[0].body.toString()).toBe(body);
 });
 
-it('does not forward accepted objects or arbitrary paths to OSS', async () => {
+it('does not forward writes to accepted objects or arbitrary paths to OSS', async () => {
   for (const path of [key.replace('/incoming/', '/accepted/'), '/ai-interview/other', '/other-bucket/file']) {
     const response = await fetch(origin + path, { method: 'PUT', body: 'test' });
     await response.text();
@@ -150,11 +169,65 @@ it('rejects generated audio writes and paths outside the audio namespace before 
   }
   for (const path of [
     audioKey.replace('.wav', '.pdf'),
-    audioKey.replace('/generated/', '/accepted/'),
+    audioKey.replace('.wav', '.html'),
     audioKey.replace('question-a.wav', 'nested/question-a.wav'),
   ]) {
     const response = await fetch(origin + path);
     await response.text();
+  }
+  expect(received).toEqual([]);
+});
+
+it('preserves signed PDF/DOCX bytes, content types and queries without site credentials or CORS', async () => {
+  const query = '?x-oss-security-token=token%2Bpart%2Fvalue%3D&x-oss-signature=synthetic';
+  for (const extension of ['pdf', 'docx']) {
+    const path = resumeKey.replace('.pdf', `.${extension}`);
+    const response = await fetch(origin + path + query, {
+      headers: { Origin: origin, Cookie: 'site-session=synthetic', Authorization: 'Bearer site-token' },
+    });
+    expect(response.status).toBe(200);
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(extension === 'pdf' ? pdf : docx);
+    expect(response.headers.get('content-type')).toBe(
+      extension === 'pdf'
+        ? 'application/pdf'
+        : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    );
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('access-control-allow-origin')).toBeNull();
+    const request = received.at(-1)!;
+    expect(request.url).toBe(path + query);
+    expect(request.headers.host).toBe(upstreamHost);
+    for (const header of ['origin', 'cookie', 'authorization'])
+      expect(request.headers[header]).toBeUndefined();
+  }
+});
+
+it('supports resume HEAD and byte ranges while preserving OSS authorization errors', async () => {
+  const head = await fetch(origin + resumeKey, { method: 'HEAD' });
+  expect(head.status).toBe(200);
+  expect(head.headers.get('content-length')).toBe(String(pdf.length));
+  expect(await head.text()).toBe('');
+  const partial = await fetch(origin + resumeKey, { headers: { Range: 'bytes=0-4' } });
+  expect(partial.status).toBe(206);
+  expect(partial.headers.get('content-range')).toBe(`bytes 0-4/${pdf.length}`);
+  expect(await partial.text()).toBe('%PDF-');
+  const expired = await fetch(origin + resumeKey + '?uploadId=expired');
+  expect(expired.status).toBe(403);
+  expect(await expired.text()).toBe('<Error><Code>AccessDenied</Code></Error>');
+});
+
+it('rejects writes and unsafe paths outside the accepted resume namespace', async () => {
+  for (const method of ['PUT', 'POST', 'PATCH', 'DELETE']) {
+    const response = await fetch(origin + resumeKey, { method });
+    expect(response.status).toBe(404);
+    await response.text();
+  }
+  for (const path of [
+    resumeKey.replace('.pdf', '.html'),
+    resumeKey.replace('.pdf', '.svg'),
+    resumeKey.replace('resume-a.pdf', 'nested/resume-a.pdf'),
+  ]) {
+    await (await fetch(origin + path)).text();
   }
   expect(received).toEqual([]);
 });

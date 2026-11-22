@@ -26,6 +26,7 @@ import { useSession } from '../stores/session';
 import type { ConsentKind } from '../types/domain';
 import { ErrorState, Loading, PageHeading } from '../components/common/ui';
 import { SystemAvatar } from '../components/common/SystemAvatar';
+import { signedUrl } from '../features/media/urls';
 import { dateText } from '../utils/interview';
 
 const consentLabels: Record<ConsentKind, { title: string; description: string }> = {
@@ -175,7 +176,7 @@ export default function Profile() {
                   {user?.system_avatar_key ? (
                     <SystemAvatar avatarKey={user.system_avatar_key} label="我的系统头像" />
                   ) : user?.avatar_url ? (
-                    <img src={user.avatar_url} alt="我的头像" />
+                    <img src={signedUrl(user.avatar_url)} alt="我的头像" />
                   ) : (
                     user?.nickname.slice(0, 1)
                   )}

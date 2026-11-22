@@ -1,7 +1,7 @@
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
-import { ossAudioProxy, ossUploadProxy } from './config/ossProxy';
+import { ossAudioProxy, ossMediaProxy, ossUploadProxy } from './config/ossProxy';
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
@@ -10,6 +10,7 @@ export default defineConfig(({ mode }) => {
     '/api': { target: env.API_PROXY_TARGET || 'http://127.0.0.1:8000', changeOrigin: true, ws: true },
     ...ossUploadProxy(ossTarget),
     ...ossAudioProxy(ossTarget),
+    ...ossMediaProxy(ossTarget),
   };
   return {
     plugins: [react(), tailwindcss()],

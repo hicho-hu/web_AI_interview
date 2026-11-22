@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Download, Headphones, LoaderCircle, MonitorPlay, Upload } from 'lucide-react';
+import { Download, Headphones, LoaderCircle, MonitorPlay, RotateCcw, Upload } from 'lucide-react';
 import { api } from '../../services/api';
 import { useSession } from '../../stores/session';
 import { userStorageKey } from '../../utils/userStorageKey';
@@ -29,6 +29,7 @@ export default function SessionReplay({
   const [captionUrl, setCaptionUrl] = useState('');
   const [cues, setCues] = useState<CaptionCue[]>([]);
   const [playhead, setPlayhead] = useState(0);
+  const [playbackRevision, setPlaybackRevision] = useState(0);
   const remote = useQuery({
     queryKey: ['session-media', interviewId],
     queryFn: () => api.sessionMedia(interviewId),
@@ -93,6 +94,20 @@ export default function SessionReplay({
     .at(-1);
   const audioSource = audio || (cloudAudio?.download_url ? signedUrl(cloudAudio.download_url) : '');
   const videoSource = video || (cloudVideo?.download_url ? signedUrl(cloudVideo.download_url) : '');
+  const audioType = (session?.audioType || cloudAudio?.content_type || '').split(';')[0];
+  const audioExtension =
+    (
+      {
+        'audio/mp4': 'm4a',
+        'audio/mpeg': 'mp3',
+        'audio/aac': 'aac',
+        'audio/wav': 'wav',
+        'audio/x-wav': 'wav',
+      } as Record<string, string>
+    )[audioType] || 'webm';
+  const videoExtension = (session?.videoType || cloudVideo?.content_type || '').includes('mp4')
+    ? 'mp4'
+    : 'webm';
   const savedRemotely = session
     ? !!session.uploadedAudioId &&
       (!session.videoType || !!session.uploadedVideoId) &&
@@ -115,7 +130,10 @@ export default function SessionReplay({
     async function prepareCaptions() {
       let current = session?.captions || [];
       if (!current.length && cloudCaptions?.download_url) {
-        const response = await fetch(signedUrl(cloudCaptions.download_url), { signal: abort.signal });
+        const response = await fetch(signedUrl(cloudCaptions.download_url), {
+          signal: abort.signal,
+          credentials: 'omit',
+        });
         if (!response.ok) throw new Error('字幕加载失败，可刷新后重试');
         current = parseCaptionsVtt(await response.text());
       }
@@ -125,7 +143,8 @@ export default function SessionReplay({
       setCues(current);
     }
     void prepareCaptions().catch((e) => {
-      if (active) setError(e);
+      if (active)
+        setError(e instanceof TypeError ? new Error('回放字幕读取失败，请刷新回放链接后重试。') : e);
     });
     return () => {
       active = false;
@@ -134,7 +153,20 @@ export default function SessionReplay({
     };
   }, [session?.id, cloudCaptions?.download_url]);
   const currentCues = cues.filter((cue) => cue.startMs <= playhead && cue.endMs >= playhead);
-  if (!session && !cloudAudio && !cloudVideo) return null;
+  if (!session && !cloudAudio && !cloudVideo)
+    return remote.isError ? <ErrorState error={remote.error} retry={() => void remote.refetch()} /> : null;
+  async function refreshPlayback() {
+    setError(null);
+    try {
+      await remote.refetch({ throwOnError: true });
+      setPlaybackRevision((value) => value + 1);
+    } catch (failure) {
+      setError(failure);
+    }
+  }
+  function playbackFailed() {
+    setError(new Error('回放文件读取失败或链接已过期，请刷新回放链接后重试。'));
+  }
   async function retryUpload() {
     if (!session) return;
     setUploading(true);
@@ -175,11 +207,13 @@ export default function SessionReplay({
       )}
       {videoSource && (
         <video
+          key={`video:${videoSource}:${playbackRevision}`}
           controls
           preload="metadata"
           playsInline
           src={videoSource}
           aria-label="整场面试视频回放"
+          onError={playbackFailed}
           onTimeUpdate={(event) => setPlayhead(event.currentTarget.currentTime * 1000)}
         >
           {captionUrl && <track kind="subtitles" src={captionUrl} srcLang="zh" label="双方字幕" />}
@@ -190,10 +224,12 @@ export default function SessionReplay({
           <Headphones size={20} />
           <span>整场面试录音</span>
           <audio
+            key={`audio:${audioSource}:${playbackRevision}`}
             controls
             preload="metadata"
             src={audioSource}
             aria-label="整场面试语音回放"
+            onError={playbackFailed}
             onTimeUpdate={(event) => setPlayhead(event.currentTarget.currentTime * 1000)}
           />
         </div>
@@ -219,7 +255,7 @@ export default function SessionReplay({
         {audioSource && (
           <a
             className="btn secondary small"
-            download={`interview-${interviewId}-audio.${session?.audioType.includes('mp4') ? 'm4a' : 'webm'}`}
+            download={`interview-${interviewId}-audio.${audioExtension}`}
             href={audio || audioSource}
           >
             <Download size={14} />
@@ -229,7 +265,7 @@ export default function SessionReplay({
         {videoSource && (
           <a
             className="btn secondary small"
-            download={`interview-${interviewId}-video.${session?.videoType?.includes('mp4') ? 'mp4' : 'webm'}`}
+            download={`interview-${interviewId}-video.${videoExtension}`}
             href={video || videoSource}
           >
             <Download size={14} />
@@ -246,6 +282,16 @@ export default function SessionReplay({
             下载字幕
           </a>
         )}
+        {(cloudAudio || cloudVideo || cloudCaptions) && (
+          <button
+            className="btn secondary small"
+            disabled={remote.isFetching}
+            onClick={() => void refreshPlayback()}
+          >
+            <RotateCcw size={14} />
+            刷新回放链接
+          </button>
+        )}
         {session &&
           (!session.uploadedAudioId ||
             (session.videoType && !session.uploadedVideoId) ||
@@ -256,7 +302,7 @@ export default function SessionReplay({
             </button>
           )}
       </div>
-      {error !== null && <ErrorState error={error} />}
+      {(error || remote.error) && <ErrorState error={error || remote.error} />}
     </section>
   );
 }

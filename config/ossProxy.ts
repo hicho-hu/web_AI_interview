@@ -1,14 +1,20 @@
 import type { ProxyOptions } from 'vite';
+import {
+  ossAcceptedObjectPath,
+  ossAudioObjectPath,
+  ossIncomingObjectPath,
+  ossResumeObjectPath,
+} from './ossPaths';
 
 // The upstream is deployment configuration, never supplied by a browser request.
-export const ossUploadPath =
-  '^/ai-interview/user/[A-Za-z0-9-]+/incoming/[A-Za-z0-9-]+\\.[A-Za-z0-9]+(?:\\?|$)';
-export const ossAudioPath =
-  '^/ai-interview/user/[A-Za-z0-9-]+/generated/[A-Za-z0-9-]+\\.(?:wav|mp3)(?:\\?|$)';
+export const ossUploadPath = `^${ossIncomingObjectPath}(?:\\?|$)`;
+export const ossAudioPath = `^${ossAudioObjectPath}(?:\\?|$)`;
+export const ossResumePath = `^${ossResumeObjectPath}(?:\\?|$)`;
+export const ossMediaPath = `^${ossAcceptedObjectPath}(?:\\?|$)`;
 
-export function ossAudioProxy(target: string): Record<string, ProxyOptions> {
+function ossReadProxy(path: string, target: string): Record<string, ProxyOptions> {
   return {
-    [ossAudioPath]: {
+    [path]: {
       target,
       changeOrigin: true,
       timeout: 90000,
@@ -30,6 +36,18 @@ export function ossAudioProxy(target: string): Record<string, ProxyOptions> {
       },
     },
   };
+}
+
+export function ossAudioProxy(target: string): Record<string, ProxyOptions> {
+  return ossReadProxy(ossAudioPath, target);
+}
+
+export function ossResumeProxy(target: string): Record<string, ProxyOptions> {
+  return ossReadProxy(ossResumePath, target);
+}
+
+export function ossMediaProxy(target: string): Record<string, ProxyOptions> {
+  return ossReadProxy(ossMediaPath, target);
 }
 
 export function ossUploadProxy(target: string): Record<string, ProxyOptions> {

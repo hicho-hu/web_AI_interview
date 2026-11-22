@@ -3,6 +3,9 @@ import { z } from 'zod';
 import { useSession } from '../stores/session';
 import { randomUUID } from '../utils/uuid';
 
+// The production CSP rejects dynamic evaluation; use Zod's runtime parser.
+z.config({ jitless: true });
+
 const envelope = z.object({
   code: z.string(),
   message: z.string(),
